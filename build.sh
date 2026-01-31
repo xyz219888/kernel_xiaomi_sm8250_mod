@@ -59,18 +59,22 @@ KSU_ZIP_STR=KSU_SUSFS
 
 echo "TARGET_DEVICE: $TARGET_DEVICE"
 
-# ==================== [Step 1: 注入 KSU (Non-GKI)] ====================
-echo "Installing KernelSU (Non-GKI mode)..."
-# 使用官方脚本注入 Non-GKI 模式
-curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s nongki
+# ==================== [Step 1: 注入 SukiSU (使用 main 分支)] ====================
+echo "Installing SukiSU (Non-GKI mode)..."
+# [修正] 使用 main 分支 (对应文档中的 susfs-main)
+# 这一步会下载 SukiSU 的驱动源码到 drivers/kernelsu
+curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
 
 # ==================== [Step 2: 注入 SUSFS (源码 Patch)] ====================
 echo "Downloading and applying SUSFS Patch..."
 # 下载你提供的 patch (Raw 链接)
+# 这个补丁非常关键，它修改内核核心文件(fs/open.c等)以适配 Non-GKI
 wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch
 
-# 应用补丁 (-p1 忽略首层目录)
-patch -p1 < susfs.patch || { echo "Patch applying failed!"; exit 1; }
+# [关键修正] 添加 -F 3 参数
+# -F 3 (Fuzz 3): 允许补丁上下文有 3 行误差，解决因清理补丁导致的微小差异
+echo "Applying patch with fuzz factor..."
+patch -p1 -F 3 < susfs.patch || { echo "Patch applying failed!"; exit 1; }
 echo "SUSFS Patch applied successfully."
 
 # ==================== [准备编译] ====================
