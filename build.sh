@@ -5,21 +5,14 @@ set -e
 
 # ==================== [自动清理旧版环境] ====================
 echo "正在应用补丁清理旧版 KSU/SUSFS..."
-# 下载并应用 'Remove KSU and SuSFS' 补丁 (hash: a05557c)
-# 使用 || true 防止如果已经是纯净环境导致报错退出
 curl -L https://github.com/ApartTUSITU/kernel_xiaomi_sm8250_mod/commit/a05557c.patch | git apply -v || true
-
-# 再次强制清理残留目录
 rm -rf drivers/susfs
 rm -rf fs/susfs
 echo "环境清理完毕。"
 # ==========================================================
 
-# [注意] 这里的路径对应 YML 中下载的 zyc-clang
 TOOLCHAIN_PATH=$HOME/zyc-clang/bin
 GIT_COMMIT_ID=$(git rev-parse --short=8 HEAD)
-
-# [修改] 如果没有传参数，默认就是 alioth
 TARGET_DEVICE="${1:-alioth}"
 
 if [ ! -d $TOOLCHAIN_PATH ]; then
@@ -27,16 +20,7 @@ if [ ! -d $TOOLCHAIN_PATH ]; then
     exit 1
 fi
 
-echo "TOOLCHAIN_PATH: [$TOOLCHAIN_PATH]"
 export PATH="$TOOLCHAIN_PATH:$PATH"
-
-# Check standard tools
-if ! command -v clang >/dev/null 2>&1; then
-    echo "[clang] does not exist."
-    exit 1
-fi
-
-# Enable ccache
 export CCACHE_DIR="$HOME/.cache/ccache_mikernel" 
 export CC="ccache gcc"
 export CXX="ccache g++"
@@ -50,10 +34,6 @@ if [ ! -f "arch/arm64/configs/${TARGET_DEVICE}_defconfig" ]; then
     exit 1
 fi
 
-echo "[clang --version]:"
-clang --version
-
-# 强制开启 KSU 变量
 KSU_ENABLE=1
 KSU_ZIP_STR=KSU_SUSFS
 
@@ -61,18 +41,21 @@ echo "TARGET_DEVICE: $TARGET_DEVICE"
 
 # ==================== [Step 1: 注入 SukiSU (使用 main 分支)] ====================
 echo "Installing SukiSU (Non-GKI mode)..."
-# [修正] 使用 main 分支 (对应文档中的 susfs-main)
-# 这一步会下载 SukiSU 的驱动源码到 drivers/kernelsu
 curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
+
+# ==================== [关键修复: KPM access_ok 参数补全] ====================
+# 你的内核 access_ok 需要 3 个参数，KPM 代码只给了 2 个
+# 这里使用 sed 自动把 access_ok( 改为 access_ok(0, 来兼容旧内核
+if [ -f "drivers/kernelsu/kpm/kpm.c" ]; then
+    echo "Applying fix for KPM access_ok macro..."
+    sed -i 's/access_ok(/access_ok(0, /g' drivers/kernelsu/kpm/kpm.c
+fi
+# ========================================================================
 
 # ==================== [Step 2: 注入 SUSFS (源码 Patch)] ====================
 echo "Downloading and applying SUSFS Patch..."
-# 下载你提供的 patch (Raw 链接)
-# 这个补丁非常关键，它修改内核核心文件(fs/open.c等)以适配 Non-GKI
 wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch
 
-# [关键修正] 添加 -F 3 参数
-# -F 3 (Fuzz 3): 允许补丁上下文有 3 行误差，解决因清理补丁导致的微小差异
 echo "Applying patch with fuzz factor..."
 patch -p1 -F 3 < susfs.patch || { echo "Patch applying failed!"; exit 1; }
 echo "SUSFS Patch applied successfully."
@@ -86,7 +69,6 @@ rm -rf anykernel/
 echo "Clone AnyKernel3"
 git clone https://github.com/liyafe1997/AnyKernel3 -b kona --single-branch --depth=1 anykernel
 
-# Add date to local version
 local_version_str="-perf"
 local_version_date_str="-$(date +%Y%m%d)-${GIT_COMMIT_ID}-perf"
 sed -i "s/${local_version_str}/${local_version_date_str}/g" arch/arm64/configs/${TARGET_DEVICE}_defconfig
@@ -97,11 +79,9 @@ sed -i "s/${local_version_str}/${local_version_date_str}/g" arch/arm64/configs/$
 echo "Building for MIUI....."
 
 dts_source=arch/arm64/boot/dts/vendor/qcom
-
-# Backup dts
 cp -a ${dts_source} .dts.bak
 
-# Correct panel dimensions on MIUI builds (Fix Display)
+# Correct panel dimensions & Fix Display
 sed -i 's/<154>/<1537>/g' ${dts_source}/dsi-panel-j1s*
 sed -i 's/<154>/<1537>/g' ${dts_source}/dsi-panel-j2*
 sed -i 's/<155>/<1544>/g' ${dts_source}/dsi-panel-j3s-37-02-0a-dsc-video.dtsi
@@ -154,14 +134,14 @@ sed -i 's/\/\/39 01 00 00 11 00 03 51 03 FF/39 01 00 00 11 00 03 51 03 FF/g' ${d
 # Make Defconfig
 make $MAKE_ARGS ${TARGET_DEVICE}_defconfig
 
-# ==================== [Step 3: 配置 .config 启用 KSU & SUSFS] ====================
-# 通过 Config 启用 Patch 注入的功能
+# ==================== [Step 3: 配置 .config] ====================
+# 已加入 SUS_MAP，并保持其他配置优化
 scripts/config --file out/.config \
     -e KSU \
     -e KSU_MANUAL_HOOK \
     -e KSU_SUSFS \
     -e KSU_SUSFS_HAS_MAGIC_MOUNT \
-    -d KSU_SUSFS_SUS_PATH \
+    -e KSU_SUSFS_SUS_PATH \
     -e KSU_SUSFS_SUS_MOUNT \
     -e KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT \
     -e KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
@@ -173,7 +153,8 @@ scripts/config --file out/.config \
     -e KSU_SUSFS_ENABLE_LOG \
     -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
     -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
-    -d KSU_SUSFS_OPEN_REDIRECT \
+    -e KSU_SUSFS_OPEN_REDIRECT \
+    -e KSU_SUSFS_SUS_MAP \
     -d KSU_SUSFS_SUS_SU \
     -e KPM
 
@@ -227,13 +208,11 @@ mv .dts.bak ${dts_source}
 rm -rf anykernel/kernels/
 mkdir -p anykernel/kernels/
 
-# 复制 Image 和 dtb 到打包目录
 cp out/arch/arm64/boot/Image anykernel/kernels/
 cp out/arch/arm64/boot/dtb anykernel/kernels/
 
 echo "Packing Zip..."
 
-# Restore local version string
 sed -i "s/${local_version_date_str}/${local_version_str}/g" arch/arm64/configs/${TARGET_DEVICE}_defconfig
 
 cd anykernel 
