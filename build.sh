@@ -40,23 +40,38 @@ KSU_ZIP_STR=KSU_SUSFS
 
 echo "TARGET_DEVICE: $TARGET_DEVICE"
 
-# ==================== [Step 1: 注入 SukiSU (使用 builtin 分支)] ====================
-echo "Installing SukiSU (Non-GKI builtin mode)..."
-# 使用 builtin 分支，获取纯净的驱动文件
-curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
+# ==================== [Step 1: 注入 SukiSU (Non-GKI main mode)] ====================
+echo "Installing SukiSU (Non-GKI main mode)..."
+# 必须用 main 分支，只有它包含 v1.6 补丁所需的函数定义！
+# builtin 分支缺少这些定义，会导致 undefined reference 报错。
+curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
 
 # ==================== [Step 2: 应用官方 Manual Hooks (v1.6)] ====================
-# 这是解决 "Unknown hook" / "未安装" 问题的关键
-# 使用官方 v1.6 补丁，它包含 open/exec/stat/input 等关键钩子
 echo "Downloading and applying SukiSU Manual Hooks (v1.6)..."
+# 使用官方 v1.6 补丁连接内核与驱动
 wget https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/main/hooks/scope_min_manual_hooks_v1.6.patch -O sukisu_hooks.patch
 
 echo "Applying SukiSU hooks..."
-# -F 3: 允许 3 行误差，确保补丁能打进去
 patch -p1 -F 3 < sukisu_hooks.patch || { echo "❌ SukiSU Hooks Patch Failed!"; exit 1; }
 echo "✅ SukiSU Hooks applied successfully."
 
-# ==================== [Step 3: 注入 SUSFS (源码 Patch)] ====================
+# ==================== [Step 3: 关键修复 - 解决 main 分支在 4.19 上的语法报错] ====================
+echo "Applying compatibility fixes for Kernel 4.19..."
+
+# 1. 修复 KPM 中的 access_ok (2参数 -> 3参数)
+if [ -f "drivers/kernelsu/kpm/kpm.c" ]; then
+    echo "  -> Fixing access_ok macro in kpm.c..."
+    sed -i 's/access_ok(/access_ok(0, /g' drivers/kernelsu/kpm/kpm.c
+fi
+
+# 2. 移除不支持的 MODULE_IMPORT_NS (4.19 没有这个功能)
+if [ -f "drivers/kernelsu/ksu.c" ]; then
+    echo "  -> Removing MODULE_IMPORT_NS in ksu.c..."
+    sed -i '/MODULE_IMPORT_NS/d' drivers/kernelsu/ksu.c
+fi
+# ========================================================================================
+
+# ==================== [Step 4: 注入 SUSFS (源码 Patch)] ====================
 echo "Downloading and applying SUSFS Patch..."
 wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch
 
@@ -138,7 +153,7 @@ sed -i 's/\/\/39 01 00 00 11 00 03 51 03 FF/39 01 00 00 11 00 03 51 03 FF/g' ${d
 # Make Defconfig
 make $MAKE_ARGS ${TARGET_DEVICE}_defconfig
 
-# ==================== [Step 4: 配置 .config (开启 KPM/Manual Hook)] ====================
+# ==================== [Step 5: 配置 .config (强制开启 KPM 和 Manual Hook)] ====================
 # [核心修正] 脚本会自动检查，如果 KPM 没开，这几行命令会强制开启它
 scripts/config --file out/.config \
     -e KSU \
