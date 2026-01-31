@@ -34,6 +34,7 @@ if [ ! -f "arch/arm64/configs/${TARGET_DEVICE}_defconfig" ]; then
     exit 1
 fi
 
+# 核心变量
 KSU_ENABLE=1
 KSU_ZIP_STR=KSU_SUSFS
 
@@ -41,16 +42,27 @@ echo "TARGET_DEVICE: $TARGET_DEVICE"
 
 # ==================== [Step 1: 注入 SukiSU (使用 builtin 分支)] ====================
 echo "Installing SukiSU (Non-GKI builtin mode)..."
-# [修改] 切换到 builtin 分支，理论上它原生支持 4.19 内核，无需 sed 修补
+# 使用 builtin 分支，获取纯净的驱动文件
 curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 
-# ==================== [Step 2: 注入 SUSFS (源码 Patch)] ====================
+# ==================== [Step 2: 应用官方 Manual Hooks (v1.6)] ====================
+# 这是解决 "Unknown hook" / "未安装" 问题的关键
+# 使用官方 v1.6 补丁，它包含 open/exec/stat/input 等关键钩子
+echo "Downloading and applying SukiSU Manual Hooks (v1.6)..."
+wget https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/main/hooks/scope_min_manual_hooks_v1.6.patch -O sukisu_hooks.patch
+
+echo "Applying SukiSU hooks..."
+# -F 3: 允许 3 行误差，确保补丁能打进去
+patch -p1 -F 3 < sukisu_hooks.patch || { echo "❌ SukiSU Hooks Patch Failed!"; exit 1; }
+echo "✅ SukiSU Hooks applied successfully."
+
+# ==================== [Step 3: 注入 SUSFS (源码 Patch)] ====================
 echo "Downloading and applying SUSFS Patch..."
 wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch
 
-echo "Applying patch with fuzz factor..."
-patch -p1 -F 3 < susfs.patch || { echo "Patch applying failed!"; exit 1; }
-echo "SUSFS Patch applied successfully."
+echo "Applying SUSFS patch..."
+patch -p1 -F 3 < susfs.patch || { echo "❌ SUSFS Patch Failed!"; exit 1; }
+echo "✅ SUSFS Patch applied successfully."
 
 # ==================== [准备编译] ====================
 
@@ -115,104 +127,4 @@ sed -i 's/\/\/39 01 00 00 00 00 03 51 07 FF/39 01 00 00 00 00 03 51 07 FF/g' ${d
 sed -i 's/\/\/39 01 00 00 00 00 03 51 0F FF/39 01 00 00 00 00 03 51 0F FF/g' ${dts_source}/dsi-panel-j1u-42-02-0b-dsc-cmd.dtsi
 sed -i 's/\/\/39 01 00 00 00 00 03 51 0F FF/39 01 00 00 00 00 03 51 0F FF/g' ${dts_source}/dsi-panel-j2-42-02-0b-dsc-cmd.dtsi
 sed -i 's/\/\/39 01 00 00 00 00 03 51 0F FF/39 01 00 00 00 00 03 51 0F FF/g' ${dts_source}/dsi-panel-j2-p1-42-02-0b-dsc-cmd.dtsi
-sed -i 's/\/\/39 01 00 00 00 00 05 51 07 FF 00 00/39 01 00 00 00 00 05 51 07 FF 00 00/g' ${dts_source}/dsi-panel-j1s-42-02-0a-dsc-cmd.dtsi
-sed -i 's/\/\/39 01 00 00 00 00 05 51 07 FF 00 00/39 01 00 00 00 00 05 51 07 FF 00 00/g' ${dts_source}/dsi-panel-j1s-42-02-0a-mp-dsc-cmd.dtsi
-sed -i 's/\/\/39 01 00 00 00 00 05 51 07 FF 00 00/39 01 00 00 00 00 05 51 07 FF 00 00/g' ${dts_source}/dsi-panel-j2-mp-42-02-0b-dsc-cmd.dtsi
-sed -i 's/\/\/39 01 00 00 00 00 05 51 07 FF 00 00/39 01 00 00 00 00 05 51 07 FF 00 00/g' ${dts_source}/dsi-panel-j2-p2-1-42-02-0b-dsc-cmd.dtsi
-sed -i 's/\/\/39 01 00 00 00 00 05 51 07 FF 00 00/39 01 00 00 00 00 05 51 07 FF 00 00/g' ${dts_source}/dsi-panel-j2s-mp-42-02-0a-dsc-cmd.dtsi
-sed -i 's/\/\/39 01 00 00 01 00 03 51 03 FF/39 01 00 00 01 00 03 51 03 FF/g' ${dts_source}/dsi-panel-j11-38-08-0a-fhd-cmd.dtsi
-sed -i 's/\/\/39 01 00 00 11 00 03 51 03 FF/39 01 00 00 11 00 03 51 03 FF/g' ${dts_source}/dsi-panel-j2-p2-1-38-0c-0a-dsc-cmd.dtsi
-
-# Make Defconfig
-make $MAKE_ARGS ${TARGET_DEVICE}_defconfig
-
-# ==================== [Step 3: 配置 .config] ====================
-# [关键修改] 已根据要求启用 OPEN_REDIRECT 和 SUS_PATH, 添加 SUS_MAP
-scripts/config --file out/.config \
-    -e KSU \
-    -e KSU_MANUAL_HOOK \
-    -e KSU_SUSFS \
-    -e KSU_SUSFS_HAS_MAGIC_MOUNT \
-    -e KSU_SUSFS_SUS_PATH \
-    -e KSU_SUSFS_SUS_MOUNT \
-    -e KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT \
-    -e KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
-    -e KSU_SUSFS_SUS_KSTAT \
-    -d KSU_SUSFS_SUS_OVERLAYFS \
-    -e KSU_SUSFS_TRY_UMOUNT \
-    -e KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT \
-    -e KSU_SUSFS_SPOOF_UNAME \
-    -e KSU_SUSFS_ENABLE_LOG \
-    -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
-    -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
-    -e KSU_SUSFS_OPEN_REDIRECT \
-    -e KSU_SUSFS_SUS_MAP \
-    -d KSU_SUSFS_SUS_SU \
-    -e KPM
-
-# General Optimization Configs
-scripts/config --file out/.config \
-    --set-str STATIC_USERMODEHELPER_PATH /system/bin/micd \
-    -e PERF_CRITICAL_RT_TASK \
-    -e SF_BINDER \
-    -e OVERLAY_FS \
-    -d DEBUG_FS \
-    -e MIGT \
-    -e MIGT_ENERGY_MODEL \
-    -e MIHW \
-    -e PACKAGE_RUNTIME_INFO \
-    -e BINDER_OPT \
-    -e KPERFEVENTS \
-    -e MILLET \
-    -e PERF_HUMANTASK \
-    -d LTO_CLANG \
-    -d LOCALVERSION_AUTO \
-    -e SF_BINDER \
-    -e XIAOMI_MIUI \
-    -d MI_MEMORY_SYSFS \
-    -e TASK_DELAY_ACCT \
-    -e MIUI_ZRAM_MEMORY_TRACKING \
-    -d CONFIG_MODULE_SIG_SHA512 \
-    -d CONFIG_MODULE_SIG_HASH \
-    -e MI_FRAGMENTION \
-    -e PERF_HELPER \
-    -e BOOTUP_RECLAIM \
-    -e MI_RECLAIM \
-    -e RTMM
-
-echo "Compiling kernel..."
-make $MAKE_ARGS -j$(nproc)
-
-if [ -f "out/arch/arm64/boot/Image" ]; then
-    echo "The file [out/arch/arm64/boot/Image] exists. Build successfully."
-else
-    echo "The file [out/arch/arm64/boot/Image] does not exist. Build failed."
-    exit 1
-fi
-
-echo "Generating dtb......"
-find out/arch/arm64/boot/dts -name '*.dtb' -exec cat {} + >out/arch/arm64/boot/dtb
-
-# Restore modified dts
-rm -rf ${dts_source}
-mv .dts.bak ${dts_source}
-
-rm -rf anykernel/kernels/
-mkdir -p anykernel/kernels/
-
-# 复制 Image 和 dtb 到打包目录
-cp out/arch/arm64/boot/Image anykernel/kernels/
-cp out/arch/arm64/boot/dtb anykernel/kernels/
-
-echo "Packing Zip..."
-
-# Restore local version string
-sed -i "s/${local_version_date_str}/${local_version_str}/g" arch/arm64/configs/${TARGET_DEVICE}_defconfig
-
-cd anykernel 
-ZIP_FILENAME=Kernel_MIUI_${TARGET_DEVICE}_${KSU_ZIP_STR}_$(date +'%Y%m%d_%H%M%S')_anykernel3_${GIT_COMMIT_ID}.zip
-zip -r9 $ZIP_FILENAME ./* -x .git .gitignore out/ ./*.zip
-mv $ZIP_FILENAME ../
-cd ..
-
-echo "Done. The flashable zip is: [./$ZIP_FILENAME]"
+sed -i 's/\/\/39 01 00 00 00 00 05 51 07 FF 00 00/39 01 00 00 00 00 05 51 07 FF 00 00/g' ${dts_source}/dsi-panel-j1s-4
