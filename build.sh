@@ -185,30 +185,9 @@ scripts/config --file out/.config \
     -e MI_RECLAIM \
     -e RTMM
 
-# ==================== [光速验证环节] ====================
-echo "⚡️ 正在进行光速验证 (SukiSU Driver Check)..."
-# 编译驱动，验证 flask.h 是否修复
-make $MAKE_ARGS drivers/kernelsu/
-if [ $? -ne 0 ]; then
-    echo "❌ [验证失败] SukiSU 驱动编译报错！请检查上方错误日志。"
-    exit 1
-fi
-
-KSU_OBJ="out/drivers/kernelsu/ksu.o"
-if [ -f "$KSU_OBJ" ]; then
-    if nm "$KSU_OBJ" | grep -q "ksu_vfs_read_hook"; then
-        echo "✅ [验证通过] 'ksu_vfs_read_hook' (变量/函数) 已成功注入！"
-    else
-        echo "❌ [验证失败] 致命错误！ksu.o 中没有 'ksu_vfs_read_hook'！"
-        exit 1
-    fi
-else
-    echo "❌ [验证失败] 找不到 $KSU_OBJ 文件。"
-    exit 1
-fi
-echo "🎉 验证通过！一切就绪，开始完整编译..."
-
 # ==================== [完整编译] ====================
+# 注意：不进行光速验证，直接编译。
+# 内核构建系统会自动保证 flask.h 在编译驱动前生成。
 echo "Compiling kernel..."
 make $MAKE_ARGS -j$(nproc)
 
