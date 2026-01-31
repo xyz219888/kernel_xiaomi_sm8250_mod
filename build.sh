@@ -40,44 +40,45 @@ KSU_ZIP_STR=KSU_SUSFS
 
 echo "TARGET_DEVICE: $TARGET_DEVICE"
 
-# ==================== [Step 1: 注入 SukiSU (Non-GKI main mode)] ====================
+# ==================== [Step 1: 注入 SukiSU (Main 分支)] ====================
 echo "Installing SukiSU (Non-GKI main mode)..."
-# 必须用 main 分支，只有它包含完整的功能代码
+# 使用 main 分支，配合 v1.6 补丁，函数名才能对应上
 curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
 
 # ==================== [Step 2: 应用官方 Manual Hooks (v1.6)] ====================
 echo "Downloading and applying SukiSU Manual Hooks (v1.6)..."
-# 使用官方补丁连接内核与驱动
+# 这个补丁使用的是新版函数名 (ksu_handle_...)，完美匹配 main 分支
 wget https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/main/hooks/scope_min_manual_hooks_v1.6.patch -O sukisu_hooks.patch
 
 echo "Applying SukiSU hooks..."
 patch -p1 -F 3 < sukisu_hooks.patch || { echo "❌ SukiSU Hooks Patch Failed!"; exit 1; }
 echo "✅ SukiSU Hooks applied successfully."
 
-# ==================== [Step 3: 关键修复 - 解决 main 分支在 4.19 上的语法报错] ====================
-echo "Applying compatibility fixes for Kernel 4.19..."
+# ==================== [🚨 Step 3: 全面修复 main 分支编译报错] ====================
+echo "Applying 4 critical fixes for Kernel 4.19 compatibility..."
 
-# 1. 修复 KPM 中的 access_ok (2参数 -> 3参数)
+# 1. 修复 access_ok 参数 (2 -> 3)
 if [ -f "drivers/kernelsu/kpm/kpm.c" ]; then
-    echo "  -> Fixing access_ok macro in kpm.c..."
+    echo "  [1/4] Fixing access_ok in kpm.c..."
     sed -i 's/access_ok(/access_ok(0, /g' drivers/kernelsu/kpm/kpm.c
 fi
 
-# 2. 移除不支持的 MODULE_IMPORT_NS
+# 2. 移除 MODULE_IMPORT_NS (4.19 不支持)
 if [ -f "drivers/kernelsu/ksu.c" ]; then
-    echo "  -> Removing MODULE_IMPORT_NS in ksu.c..."
+    echo "  [2/4] Removing MODULE_IMPORT_NS in ksu.c..."
     sed -i '/MODULE_IMPORT_NS/d' drivers/kernelsu/ksu.c
 fi
 
-# 3. [新增] 修复 allowlist.c 中的 TWA_RESUME 和 put_task_struct 报错
+# 3. 修复 TWA_RESUME 未定义 (替换为 true)
+# 4. 修复 put_task_struct 隐式声明 (补充头文件)
 if [ -f "drivers/kernelsu/allowlist.c" ]; then
-    echo "  -> Fixing TWA_RESUME and missing headers in allowlist.c..."
-    # 4.19 内核 task_work_add 第三个参数是 bool notify，替换 TWA_RESUME 为 true
+    echo "  [3/4] Fixing TWA_RESUME in allowlist.c..."
     sed -i 's/TWA_RESUME/true/g' drivers/kernelsu/allowlist.c
-    # 补充缺失的头文件，解决 implicit declaration of put_task_struct
+    
+    echo "  [4/4] Adding missing header to allowlist.c..."
     sed -i '1i #include <linux/sched/task.h>' drivers/kernelsu/allowlist.c
 fi
-# ========================================================================================
+# =================================================================================
 
 # ==================== [Step 4: 注入 SUSFS (源码 Patch)] ====================
 echo "Downloading and applying SUSFS Patch..."
