@@ -1,4 +1,4 @@
-name: Build All Devices Kernel (Matrix Parallel)
+name: Build Alioth Kernel (Only KSU/SUSFS)
 
 on:
   workflow_dispatch:
@@ -6,11 +6,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    strategy:
-      fail-fast: false
-      matrix:
-        device: [psyche, umi, munch, lmi, cmi, cas, apollo, alioth, elish, enuma, dagu, pipa]
-
     steps:
     - name: Checkout source
       uses: actions/checkout@v4
@@ -30,40 +25,15 @@ jobs:
         tar -zxvf Clang-15.0.7-20251111.tar.gz
         cd $GITHUB_WORKSPACE
 
-    # 只保留这一步：编译带 KSU/SUSFS 的版本
-    # 删除了无 KSU 的步骤，也删除了参数 ksu (脚本内默认会开启 ksu 逻辑，传参数是为了兼容性)
-    - name: Build kernel for ${{ matrix.device }} (With KSU & SUSFS)
+    # 编译 Alioth (参数 alioth 会传给 build.sh，或者脚本也会默认使用 alioth)
+    - name: Build kernel for Alioth
       run: |
-        bash build.sh ${{ matrix.device }} ksu
+        bash build.sh alioth
 
-    - name: Upload zips for ${{ matrix.device }}
+    # 上传产物到 GitHub Actions Summary
+    - name: Upload zip
       uses: actions/upload-artifact@v4
       with:
-        name: zips-${{ matrix.device }}
+        name: Kernel_Alioth_KSU_SUSFS
         path: |
-          Kernel_MIUI_${{ matrix.device }}*.zip
-
-  release:
-    runs-on: ubuntu-22.04
-    needs: build
-    steps:
-    - name: Download all artifacts
-      uses: actions/download-artifact@v4
-      with:
-        path: ./release_zips
-
-    - name: Get date and short SHA
-      id: vars
-      run: |
-        echo "date=$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
-        echo "sha=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
-
-    - name: Create GitHub Release
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: build-${{ steps.vars.outputs.date }}-${{ steps.vars.outputs.sha }}
-        name: "Kernel Build ${{ steps.vars.outputs.date }}-${{ steps.vars.outputs.sha }}"
-        body: "Automated kernel build for commit ${{ github.sha }}"
-        files: ./release_zips/**/*.zip
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          Kernel_MIUI_alioth*.zip
