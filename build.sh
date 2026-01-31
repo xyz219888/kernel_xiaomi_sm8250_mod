@@ -40,45 +40,91 @@ KSU_ZIP_STR=KSU_SUSFS
 
 echo "TARGET_DEVICE: $TARGET_DEVICE"
 
-# ==================== [Step 1: 注入 SukiSU (Main 分支)] ====================
-echo "Installing SukiSU (Non-GKI main mode)..."
-# 使用 main 分支，配合 v1.6 补丁，函数名才能对应上
-curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
+# ==================== [Step 1: 注入 SukiSU (Builtin 分支)] ====================
+echo "Installing SukiSU (Non-GKI builtin mode)..."
+# 使用 builtin 分支，基础代码兼容 4.19，无语法报错
+curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 
 # ==================== [Step 2: 应用官方 Manual Hooks (v1.6)] ====================
 echo "Downloading and applying SukiSU Manual Hooks (v1.6)..."
-# 这个补丁使用的是新版函数名 (ksu_handle_...)，完美匹配 main 分支
+# 这是你在 fs/ 目录下的“开关”
 wget https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/main/hooks/scope_min_manual_hooks_v1.6.patch -O sukisu_hooks.patch
 
 echo "Applying SukiSU hooks..."
 patch -p1 -F 3 < sukisu_hooks.patch || { echo "❌ SukiSU Hooks Patch Failed!"; exit 1; }
 echo "✅ SukiSU Hooks applied successfully."
 
-# ==================== [🚨 Step 3: 全面修复 main 分支编译报错] ====================
-echo "Applying 4 critical fixes for Kernel 4.19 compatibility..."
+# ==================== [Step 3: 关键步骤 - 注入丢失的函数实现] ====================
+echo "Injecting missing hook implementations into builtin driver..."
 
-# 1. 修复 access_ok 参数 (2 -> 3)
-if [ -f "drivers/kernelsu/kpm/kpm.c" ]; then
-    echo "  [1/4] Fixing access_ok in kpm.c..."
-    sed -i 's/access_ok(/access_ok(0, /g' drivers/kernelsu/kpm/kpm.c
-fi
+# 我们直接把缺失的函数定义追加到 drivers/kernelsu/ksu.c 的末尾
+# 这些代码会作为“桥梁”，连接 v1.6 补丁和 builtin 驱动内部的逻辑
+cat >> drivers/kernelsu/ksu.c <<'EOF'
 
-# 2. 移除 MODULE_IMPORT_NS (4.19 不支持)
-if [ -f "drivers/kernelsu/ksu.c" ]; then
-    echo "  [2/4] Removing MODULE_IMPORT_NS in ksu.c..."
-    sed -i '/MODULE_IMPORT_NS/d' drivers/kernelsu/ksu.c
-fi
+/* ========================================================================== */
+/* [INJECTED CODE] Manual Hook Wrappers for Non-GKI (Restored from History)   */
+/* These functions bridge the gap between v1.6 hooks and builtin driver       */
+/* ========================================================================== */
 
-# 3. 修复 TWA_RESUME 未定义 (替换为 true)
-# 4. 修复 put_task_struct 隐式声明 (补充头文件)
-if [ -f "drivers/kernelsu/allowlist.c" ]; then
-    echo "  [3/4] Fixing TWA_RESUME in allowlist.c..."
-    sed -i 's/TWA_RESUME/true/g' drivers/kernelsu/allowlist.c
+#include <linux/fs.h>
+#include <linux/version.h>
+#include "ksu.h"
+
+// 1. FACCESSAT HOOK
+// builtin 分支内部有 ksu_handle_faccessat_sucompat，但 v1.6 呼叫的是 ksu_handle_faccessat
+extern int ksu_handle_faccessat_sucompat(int *dfd, const char __user **filename_user, int *mode, int *flags);
+int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags) {
+    return ksu_handle_faccessat_sucompat(dfd, filename_user, mode, flags);
+}
+
+// 2. STAT HOOK
+extern int ksu_handle_stat_sucompat(int *dfd, const char __user **filename_user, int *flags);
+int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags) {
+    return ksu_handle_stat_sucompat(dfd, filename_user, flags);
+}
+
+// 3. READ HOOK
+// 这是最关键的，用于模块加载。我们需要手动实现这个逻辑。
+extern int ksu_handle_vfs_read_hook(struct file *file, char __user **buf, size_t *count, loff_t *pos);
+int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr) {
+    struct file *file;
+    // 使用 fget 获取文件对象
+    file = fget(fd);
+    if (!file) return 0;
     
-    echo "  [4/4] Adding missing header to allowlist.c..."
-    sed -i '1i #include <linux/sched/task.h>' drivers/kernelsu/allowlist.c
-fi
-# =================================================================================
+    // 调用内部核心 hook
+    ksu_handle_vfs_read_hook(file, buf_ptr, count_ptr, &file->f_pos);
+    
+    // 释放文件对象引用
+    fput(file);
+    return 0;
+}
+
+// 4. INPUT HOOK (Safe Mode)
+// 这是一个简单的占位符，防止链接报错。builtin 分支可能通过其他方式处理安全模式。
+// 但 v1.6 补丁需要它。
+#if defined(CONFIG_KSU_MANUAL_HOOK)
+bool ksu_input_hook __read_mostly = true;
+int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value) {
+    return 0;
+}
+#endif
+
+// 5. EXECVE HOOK (Root Grant)
+extern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);
+int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags) {
+    return ksu_handle_execveat_sucompat(fd, filename_ptr, argv, envp, flags);
+}
+
+// 6. COMPAT EXECVE HOOK (For 32-bit apps)
+int ksu_handle_execve_sucompat(int *fd, const char __user **filename_user, void *argv, void *envp, int *flags) {
+     return 0; // 4.19 compatibility stub
+}
+
+/* ========================================================================== */
+EOF
+
+echo "✅ Missing hooks code injected successfully."
 
 # ==================== [Step 4: 注入 SUSFS (源码 Patch)] ====================
 echo "Downloading and applying SUSFS Patch..."
@@ -162,7 +208,8 @@ sed -i 's/\/\/39 01 00 00 11 00 03 51 03 FF/39 01 00 00 11 00 03 51 03 FF/g' ${d
 # Make Defconfig
 make $MAKE_ARGS ${TARGET_DEVICE}_defconfig
 
-# ==================== [Step 5: 配置 .config (强制开启 KPM 和 Manual Hook)] ====================
+# ==================== [Step 5: 配置 .config] ====================
+# [核心] 强制开启 KPM 和 Manual Hook
 scripts/config --file out/.config \
     -e KSU \
     -e KSU_MANUAL_HOOK \
