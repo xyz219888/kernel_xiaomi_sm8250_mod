@@ -42,13 +42,12 @@ echo "TARGET_DEVICE: $TARGET_DEVICE"
 
 # ==================== [Step 1: 注入 SukiSU (Non-GKI main mode)] ====================
 echo "Installing SukiSU (Non-GKI main mode)..."
-# 必须用 main 分支，只有它包含 v1.6 补丁所需的函数定义！
-# builtin 分支缺少这些定义，会导致 undefined reference 报错。
+# 必须用 main 分支，只有它包含完整的功能代码
 curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
 
 # ==================== [Step 2: 应用官方 Manual Hooks (v1.6)] ====================
 echo "Downloading and applying SukiSU Manual Hooks (v1.6)..."
-# 使用官方 v1.6 补丁连接内核与驱动
+# 使用官方补丁连接内核与驱动
 wget https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/main/hooks/scope_min_manual_hooks_v1.6.patch -O sukisu_hooks.patch
 
 echo "Applying SukiSU hooks..."
@@ -64,10 +63,19 @@ if [ -f "drivers/kernelsu/kpm/kpm.c" ]; then
     sed -i 's/access_ok(/access_ok(0, /g' drivers/kernelsu/kpm/kpm.c
 fi
 
-# 2. 移除不支持的 MODULE_IMPORT_NS (4.19 没有这个功能)
+# 2. 移除不支持的 MODULE_IMPORT_NS
 if [ -f "drivers/kernelsu/ksu.c" ]; then
     echo "  -> Removing MODULE_IMPORT_NS in ksu.c..."
     sed -i '/MODULE_IMPORT_NS/d' drivers/kernelsu/ksu.c
+fi
+
+# 3. [新增] 修复 allowlist.c 中的 TWA_RESUME 和 put_task_struct 报错
+if [ -f "drivers/kernelsu/allowlist.c" ]; then
+    echo "  -> Fixing TWA_RESUME and missing headers in allowlist.c..."
+    # 4.19 内核 task_work_add 第三个参数是 bool notify，替换 TWA_RESUME 为 true
+    sed -i 's/TWA_RESUME/true/g' drivers/kernelsu/allowlist.c
+    # 补充缺失的头文件，解决 implicit declaration of put_task_struct
+    sed -i '1i #include <linux/sched/task.h>' drivers/kernelsu/allowlist.c
 fi
 # ========================================================================================
 
@@ -154,7 +162,6 @@ sed -i 's/\/\/39 01 00 00 11 00 03 51 03 FF/39 01 00 00 11 00 03 51 03 FF/g' ${d
 make $MAKE_ARGS ${TARGET_DEVICE}_defconfig
 
 # ==================== [Step 5: 配置 .config (强制开启 KPM 和 Manual Hook)] ====================
-# [核心修正] 脚本会自动检查，如果 KPM 没开，这几行命令会强制开启它
 scripts/config --file out/.config \
     -e KSU \
     -e KSU_MANUAL_HOOK \
