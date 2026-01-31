@@ -39,18 +39,10 @@ KSU_ZIP_STR=KSU_SUSFS
 
 echo "TARGET_DEVICE: $TARGET_DEVICE"
 
-# ==================== [Step 1: 注入 SukiSU (使用 main 分支)] ====================
-echo "Installing SukiSU (Non-GKI mode)..."
-curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
-
-# ==================== [关键修复: KPM access_ok 参数补全] ====================
-# 你的内核 access_ok 需要 3 个参数，KPM 代码只给了 2 个
-# 这里使用 sed 自动把 access_ok( 改为 access_ok(0, 来兼容旧内核
-if [ -f "drivers/kernelsu/kpm/kpm.c" ]; then
-    echo "Applying fix for KPM access_ok macro..."
-    sed -i 's/access_ok(/access_ok(0, /g' drivers/kernelsu/kpm/kpm.c
-fi
-# ========================================================================
+# ==================== [Step 1: 注入 SukiSU (使用 builtin 分支)] ====================
+echo "Installing SukiSU (Non-GKI builtin mode)..."
+# [修改] 切换到 builtin 分支，理论上它原生支持 4.19 内核，无需 sed 修补
+curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 
 # ==================== [Step 2: 注入 SUSFS (源码 Patch)] ====================
 echo "Downloading and applying SUSFS Patch..."
@@ -135,7 +127,7 @@ sed -i 's/\/\/39 01 00 00 11 00 03 51 03 FF/39 01 00 00 11 00 03 51 03 FF/g' ${d
 make $MAKE_ARGS ${TARGET_DEVICE}_defconfig
 
 # ==================== [Step 3: 配置 .config] ====================
-# 已加入 SUS_MAP，并保持其他配置优化
+# [关键修改] 已根据要求启用 OPEN_REDIRECT 和 SUS_PATH, 添加 SUS_MAP
 scripts/config --file out/.config \
     -e KSU \
     -e KSU_MANUAL_HOOK \
@@ -208,11 +200,13 @@ mv .dts.bak ${dts_source}
 rm -rf anykernel/kernels/
 mkdir -p anykernel/kernels/
 
+# 复制 Image 和 dtb 到打包目录
 cp out/arch/arm64/boot/Image anykernel/kernels/
 cp out/arch/arm64/boot/dtb anykernel/kernels/
 
 echo "Packing Zip..."
 
+# Restore local version string
 sed -i "s/${local_version_date_str}/${local_version_str}/g" arch/arm64/configs/${TARGET_DEVICE}_defconfig
 
 cd anykernel 
