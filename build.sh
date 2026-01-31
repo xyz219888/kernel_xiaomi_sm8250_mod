@@ -54,6 +54,8 @@ echo "✅ SukiSU Hooks applied successfully."
 
 # ==================== [Step 3: 终极修复 - 注入缺失的变量和函数] ====================
 echo "Injecting missing variables and hooks into builtin driver..."
+
+# 修改 drivers/kernelsu/ksu.c，补全所有缺失的定义，解决链接错误
 cat >> drivers/kernelsu/ksu.c <<'EOF'
 
 /* ========================================================================== */
@@ -109,15 +111,16 @@ int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user 
 /* ========================================================================== */
 EOF
 
-# ==================== [Step 3.1: 修复 flask.h 头文件找不到的问题] ====================
-echo "Fixing missing header includes in drivers/kernelsu/Makefile..."
-# 强制把 SELinux 的头文件路径加到 KSU 的编译参数里
-# 这样编译器就能找到 flask.h 和 avtab.h 了
-if [ -f "drivers/kernelsu/Makefile" ]; then
-    sed -i '$a ccflags-y += -I$(srctree)/security/selinux/include' drivers/kernelsu/Makefile
-    sed -i '$a ccflags-y += -I$(srctree)/security/selinux/ss' drivers/kernelsu/Makefile
-    echo "✅ Added SELinux include paths to drivers/kernelsu/Makefile"
-fi
+# ==================== [Step 3.1: 关键修复 - 解决 flask.h 找不到的问题] ====================
+echo "Fixing missing header includes (flask.h) in drivers/kernelsu/Makefile..."
+# 强制把 SELinux 的头文件路径（包括源码目录和输出目录）加到 KSU 的编译参数里
+# 使用 cat >> 追加到 Makefile 末尾，确保变量生效
+cat >> drivers/kernelsu/Makefile <<'EOF'
+ccflags-y += -I$(srctree)/security/selinux/include
+ccflags-y += -I$(objtree)/security/selinux/include
+ccflags-y += -I$(srctree)/security/selinux/ss
+EOF
+echo "✅ Added SELinux include paths to drivers/kernelsu/Makefile"
 
 # ==================== [Step 4: 注入 SUSFS (源码 Patch)] ====================
 echo "Downloading and applying SUSFS Patch..."
@@ -184,6 +187,7 @@ scripts/config --file out/.config \
 
 # ==================== [光速验证环节] ====================
 echo "⚡️ 正在进行光速验证 (SukiSU Driver Check)..."
+# 编译驱动，验证 flask.h 是否修复
 make $MAKE_ARGS drivers/kernelsu/
 if [ $? -ne 0 ]; then
     echo "❌ [验证失败] SukiSU 驱动编译报错！请检查上方错误日志。"
@@ -202,7 +206,7 @@ else
     echo "❌ [验证失败] 找不到 $KSU_OBJ 文件。"
     exit 1
 fi
-echo "🎉 验证通过！开始完整编译..."
+echo "🎉 验证通过！一切就绪，开始完整编译..."
 
 # ==================== [完整编译] ====================
 echo "Compiling kernel..."
