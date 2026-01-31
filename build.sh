@@ -9,23 +9,18 @@ echo "正在应用补丁清理旧版 KSU/SUSFS..."
 # 使用 || true 防止如果已经是纯净环境导致报错退出
 curl -L https://github.com/ApartTUSITU/kernel_xiaomi_sm8250_mod/commit/a05557c.patch | git apply -v || true
 
-# 再次强制清理残留目录，确保万无一失
+# 再次强制清理残留目录
 rm -rf drivers/susfs
 rm -rf fs/susfs
 echo "环境清理完毕。"
 # ==========================================================
 
-# [注意] 这里匹配你 YML 文件中下载的 zyc-clang 路径
+# [注意] 这里的路径对应 YML 中下载的 zyc-clang
 TOOLCHAIN_PATH=$HOME/zyc-clang/bin
 GIT_COMMIT_ID=$(git rev-parse --short=8 HEAD)
-TARGET_DEVICE=$1
 
-# 如果没有参数，默认加上 ksu 参数，因为你只想要 ksu 版本
-if [ -z "$1" ]; then
-    echo "Error: No argument provided."
-    echo "Example: bash build.sh lmi ksu"
-    exit 1
-fi
+# [修改] 如果没有传参数，默认就是 alioth
+TARGET_DEVICE="${1:-alioth}"
 
 if [ ! -d $TOOLCHAIN_PATH ]; then
     echo "TOOLCHAIN_PATH [$TOOLCHAIN_PATH] does not exist."
@@ -58,7 +53,7 @@ fi
 echo "[clang --version]:"
 clang --version
 
-# 强制开启 KSU 逻辑
+# 强制开启 KSU 变量
 KSU_ENABLE=1
 KSU_ZIP_STR=KSU_SUSFS
 
@@ -66,15 +61,15 @@ echo "TARGET_DEVICE: $TARGET_DEVICE"
 
 # ==================== [Step 1: 注入 KSU (Non-GKI)] ====================
 echo "Installing KernelSU (Non-GKI mode)..."
+# 使用官方脚本注入 Non-GKI 模式
 curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s nongki
 
 # ==================== [Step 2: 注入 SUSFS (源码 Patch)] ====================
 echo "Downloading and applying SUSFS Patch..."
-# 下载你指定的 patch (转换为 Raw 链接)
+# 下载你提供的 patch (Raw 链接)
 wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch
 
-# 应用补丁 (-p1 表示忽略第一层目录，通常 patch 都是这样打的)
-# 如果补丁有冲突，脚本会在这里报错停止，方便你调试
+# 应用补丁 (-p1 忽略首层目录)
 patch -p1 < susfs.patch || { echo "Patch applying failed!"; exit 1; }
 echo "SUSFS Patch applied successfully."
 
@@ -156,7 +151,7 @@ sed -i 's/\/\/39 01 00 00 11 00 03 51 03 FF/39 01 00 00 11 00 03 51 03 FF/g' ${d
 make $MAKE_ARGS ${TARGET_DEVICE}_defconfig
 
 # ==================== [Step 3: 配置 .config 启用 KSU & SUSFS] ====================
-# 这里非常重要，因为 Patch 只是把代码放进去了，还需要在 config 里把“开关”打开
+# 通过 Config 启用 Patch 注入的功能
 scripts/config --file out/.config \
     -e KSU \
     -e KSU_MANUAL_HOOK \
@@ -228,7 +223,7 @@ mv .dts.bak ${dts_source}
 rm -rf anykernel/kernels/
 mkdir -p anykernel/kernels/
 
-# 这里的 patch_linux 已经删除了，因为你在开头用了源码 patch
+# 复制 Image 和 dtb 到打包目录
 cp out/arch/arm64/boot/Image anykernel/kernels/
 cp out/arch/arm64/boot/dtb anykernel/kernels/
 
