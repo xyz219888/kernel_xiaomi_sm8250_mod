@@ -3,8 +3,9 @@
 # 遇到错误立即停止
 set -e
 
-# ==================== [Step 0: 环境清理] ====================
+# ==================== [Step 0: 环境清理 (核弹级)] ====================
 echo "🧹 正在执行回滚清理..."
+# 必须先回滚补丁，否则会有残留
 curl -L https://github.com/ApartTUSITU/kernel_xiaomi_sm8250_mod/commit/a05557c.patch | git apply -v || true
 rm -rf drivers/susfs
 rm -rf fs/susfs
@@ -24,11 +25,11 @@ export CXX="ccache g++"
 export PATH="/usr/lib/ccache:$PATH"
 MAKE_ARGS="ARCH=arm64 SUBARCH=arm64 O=out CC=clang CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- CLANG_TRIPLE=aarch64-linux-gnu-"
 
-# ==================== [Step 1: 插件安装与补丁] ====================
+# ==================== [Step 1: 安装插件] ====================
 echo "⬇️ 安装 SukiSU (Builtin)..."
 curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 
-echo "🪝 应用 v1.6 Manual Hook..."
+echo "🪝 应用 v1.6 钩子..."
 wget https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/main/hooks/scope_min_manual_hooks_v1.6.patch -O sukisu_hooks.patch
 patch -p1 -F 3 < sukisu_hooks.patch || { echo "❌ 钩子补丁失败！"; exit 1; }
 
@@ -36,11 +37,11 @@ echo "📦 应用 SUSFS 补丁..."
 wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch
 patch -p1 -F 3 < susfs.patch || { echo "❌ SUSFS 补丁失败！"; exit 1; }
 
-# ==================== [Step 2: 关键代码注入 (你的救命药)] ====================
-echo "💉 注入缺失函数 (这是防止最后报错的关键)..."
+# ==================== [Step 2: 注入防报错代码 (关键)] ====================
+echo "💉 注入缺失函数 (解决 Undefined Reference)..."
 cat >> drivers/kernelsu/ksu.c <<'EOF'
 
-/* [INJECTED FIX] Restoring Missing Symbols for 4.19 Patch */
+/* [INJECTED FIX] Restoring Missing Symbols */
 #include <linux/fs.h>
 #include <linux/version.h>
 #include <linux/export.h> 
@@ -95,14 +96,14 @@ int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user 
 EXPORT_SYMBOL(ksu_handle_sys_reboot);
 EOF
 
-# 修复头文件
+# 修复 flask.h 头文件路径 (解决编译报错)
 cat >> drivers/kernelsu/Makefile <<'EOF'
 ccflags-y += -I$(srctree)/security/selinux/include
 ccflags-y += -I$(objtree)/security/selinux/include
 ccflags-y += -I$(srctree)/security/selinux/ss
 EOF
 
-# 强制 Makefile
+# ==================== [Step 3: 强制内置 (Makefile)] ====================
 echo "🔒 锁定 Makefile..."
 if [ -f "drivers/kernelsu/Makefile" ]; then
     sed -i 's/obj-$(CONFIG_KSU)/obj-y/g' drivers/kernelsu/Makefile
@@ -110,7 +111,7 @@ fi
 sed -i '/kernelsu/d' drivers/Makefile
 echo "obj-y += kernelsu/" >> drivers/Makefile
 
-# 修复 DTS
+# ==================== [Step 4: DTS 修复] ====================
 echo "🔧 应用 DTS 修复..."
 dts_source=arch/arm64/boot/dts/vendor/qcom
 cp -a ${dts_source} .dts.bak
@@ -159,34 +160,34 @@ sed -i 's/\/\/39 01 00 00 00 00 05 51 07 FF 00 00/39 01 00 00 00 00 05 51 07 FF 
 sed -i 's/\/\/39 01 00 00 01 00 03 51 03 FF/39 01 00 00 01 00 03 51 03 FF/g' ${dts_source}/dsi-panel-j11-38-08-0a-fhd-cmd.dtsi
 sed -i 's/\/\/39 01 00 00 11 00 03 51 03 FF/39 01 00 00 11 00 03 51 03 FF/g' ${dts_source}/dsi-panel-j2-p2-1-38-0c-0a-dsc-cmd.dtsi
 
-# ==================== [Step 7: ⚡️ 光速质检 (你要求的)] ====================
-echo "⚡️ 正在进行光速质检 (只编译驱动，不编译全内核)..."
-echo "   这个步骤大约需要 1-2 分钟。如果报错，会立刻停止！"
-
+# ==================== [Step 5: ⚡️ 修正版光速质检] ====================
+echo "⚡️ 正在进行光速质检 (修复了 flask.h 问题)..."
+echo "   1. 正在生成 Defconfig (直接读取你的配置)..."
 make $MAKE_ARGS ${TARGET_DEVICE}_defconfig > /dev/null
 
-# 1. 尝试单独编译 SukiSU
-# 只要这一步过了，说明 99% 的 undefined reference 问题都解决了
+# ⚠️ 关键步骤：先运行 prepare，它会生成 flask.h 等所有头文件
+echo "   2. 正在预处理内核 (生成头文件，耗时约1-2分钟)..."
+make $MAKE_ARGS prepare
+
+echo "   3. 正在编译 SukiSU 驱动 (验证代码是否注入成功)..."
 make $MAKE_ARGS drivers/kernelsu/
 
-# 2. 检查产物
-if [ ! -f "out/drivers/kernelsu/ksu.o" ]; then
-    echo "❌ [质检失败] SukiSU 驱动根本没编出来！"
-    exit 1
-fi
-
-# 3. 检查符号 (double check)
-# 只要 grep 找到了 ksu_vfs_read_hook 符号，说明代码注入成功
-if nm out/drivers/kernelsu/ksu.o | grep -q "ksu_vfs_read_hook"; then
-    echo "✅ [质检通过] SukiSU 驱动编译成功且符号存在！"
-    echo "🚀 放心了，开始完整编译..."
+# 检查产物和符号
+if [ -f "out/drivers/kernelsu/ksu.o" ]; then
+    if nm out/drivers/kernelsu/ksu.o | grep -q "ksu_vfs_read_hook"; then
+        echo "✅ [质检通过] 驱动编译成功，且关键符号已注入！"
+        echo "🚀 现在可以放心进行完整编译了..."
+    else
+        echo "❌ [质检失败] 驱动编出来了，但没找到 ksu_vfs_read_hook 符号！"
+        exit 1
+    fi
 else
-    echo "❌ [质检失败] 驱动编出来了，但是没有找到 ksu_vfs_read_hook 符号！"
-    echo "   这意味着代码注入没生效，后面肯定会报错。"
+    echo "❌ [质检失败] 驱动编译报错！请检查上方错误信息。"
     exit 1
 fi
 
-# ==================== [Step 8: 完整编译] ====================
+# ==================== [Step 6: 完整编译] ====================
+echo "🚀 开始完整编译..."
 make $MAKE_ARGS -j$(nproc)
 
 if [ ! -f "out/arch/arm64/boot/Image" ]; then
