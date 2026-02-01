@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# 遇到错误立即停止，不浪费时间
+# 遇到任何错误立即停止，绝不含糊
 set -e
 
-# ==================== [Step 0: 环境清理] ====================
+# ==================== [Step 0: 环境彻底清理] ====================
 echo "🧹 正在清理环境..."
 rm -rf drivers/susfs
 rm -rf fs/susfs
@@ -12,7 +12,7 @@ rm -rf drivers/kernelsu
 git checkout drivers/Makefile 2>/dev/null || true
 echo "✅ 环境清理完毕。"
 
-# 环境变量设置 (保持你原来的)
+# 环境变量设置
 TOOLCHAIN_PATH=$HOME/zyc-clang/bin
 GIT_COMMIT_ID=$(git rev-parse --short=8 HEAD)
 TARGET_DEVICE="${1:-alioth}"
@@ -24,7 +24,7 @@ export CXX="ccache g++"
 export PATH="/usr/lib/ccache:$PATH"
 MAKE_ARGS="ARCH=arm64 SUBARCH=arm64 O=out CC=clang CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- CLANG_TRIPLE=aarch64-linux-gnu-"
 
-# ==================== [Step 1: 安装 SukiSU] ====================
+# ==================== [Step 1: 安装 SukiSU (Builtin)] ====================
 echo "⬇️ 安装 SukiSU (Builtin Mode)..."
 curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 
@@ -74,7 +74,7 @@ EXPORT_SYMBOL(ksu_input_hook);
 int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value) { return 0; }
 EXPORT_SYMBOL(ksu_handle_input_handle_event);
 
-// 4. DEVPTS HOOK (修复：补全 pty.c 需要的函数)
+// 4. DEVPTS HOOK (修复：补全 pty.c 需要的函数，之前漏了这个导致报错)
 int ksu_handle_devpts(struct inode *inode) { return 0; }
 EXPORT_SYMBOL(ksu_handle_devpts);
 
@@ -103,18 +103,21 @@ EOF
 
 # ==================== [Step 4: 强制内置 (Fix Relocation)] ====================
 echo "🔒 执行强制内置策略..."
+# 暴力修改 SukiSU Makefile，无视配置，强制 obj-y
 if [ -f "drivers/kernelsu/Makefile" ]; then
     sed -i 's/obj-$(CONFIG_KSU)/obj-y/g' drivers/kernelsu/Makefile
 fi
+# 暴力修改 Drivers Makefile，强行注册 kernelsu
 sed -i '/kernelsu/d' drivers/Makefile
 echo "obj-y += kernelsu/" >> drivers/Makefile
+echo "✅ 已锁定为 Built-in 模式。"
 
 # ==================== [Step 5: SUSFS 补丁] ====================
 echo "📦 应用 SUSFS 补丁..."
 wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch
 patch -p1 -F 3 < susfs.patch || { echo "❌ SUSFS 补丁失败！"; exit 1; }
 
-# ==================== [Step 6: DTS 屏幕/触控修复 (MIUI必备)] ====================
+# ==================== [Step 6: DTS 屏幕/触控修复 (复刻老代码)] ====================
 echo "🔧 应用 DTS 屏幕与触控修复..."
 dts_source=arch/arm64/boot/dts/vendor/qcom
 cp -a ${dts_source} .dts.bak
@@ -171,7 +174,7 @@ sed -i 's/\/\/39 01 00 00 00 00 05 51 07 FF 00 00/39 01 00 00 00 00 05 51 07 FF 
 sed -i 's/\/\/39 01 00 00 01 00 03 51 03 FF/39 01 00 00 01 00 03 51 03 FF/g' ${dts_source}/dsi-panel-j11-38-08-0a-fhd-cmd.dtsi
 sed -i 's/\/\/39 01 00 00 11 00 03 51 03 FF/39 01 00 00 11 00 03 51 03 FF/g' ${dts_source}/dsi-panel-j2-p2-1-38-0c-0a-dsc-cmd.dtsi
 
-# ==================== [Step 8: 注入全能配置] ====================
+# ==================== [Step 7: 注入全能配置] ====================
 echo "⚙️ 注入配置 (KSU + SUSFS + MIUI)..."
 # 如果目录没有 custom_config.txt，先检查
 if [ -f "custom_config.txt" ]; then
@@ -186,7 +189,7 @@ fi
 # 正式生成 .config
 make $MAKE_ARGS ${TARGET_DEVICE}_defconfig
 
-# ==================== [Step 9: 开始编译] ====================
+# ==================== [Step 8: 开始编译] ====================
 echo "🚀 开始最终编译 (Full Compilation)..."
 make $MAKE_ARGS -j$(nproc)
 
