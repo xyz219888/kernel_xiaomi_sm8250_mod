@@ -1,18 +1,19 @@
 #!/bin/bash
 
-# 遇到任何错误立即停止，绝不含糊
+# 遇到错误立即停止
 set -e
 
-# ==================== [Step 0: 环境彻底清理] ====================
-echo "🧹 正在清理环境..."
+# ==================== [Step 0: 环境清理] ====================
+echo "🧹 正在执行回滚清理..."
+# 按你的要求使用补丁回滚
+curl -L https://github.com/ApartTUSITU/kernel_xiaomi_sm8250_mod/commit/a05557c.patch | git apply -v || true
 rm -rf drivers/susfs
 rm -rf fs/susfs
 rm -rf drivers/kernelsu
-# 还原可能被改坏的 Makefile
 git checkout drivers/Makefile 2>/dev/null || true
 echo "✅ 环境清理完毕。"
 
-# 环境变量设置
+# 环境变量
 TOOLCHAIN_PATH=$HOME/zyc-clang/bin
 GIT_COMMIT_ID=$(git rev-parse --short=8 HEAD)
 TARGET_DEVICE="${1:-alioth}"
@@ -24,18 +25,18 @@ export CXX="ccache g++"
 export PATH="/usr/lib/ccache:$PATH"
 MAKE_ARGS="ARCH=arm64 SUBARCH=arm64 O=out CC=clang CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- CLANG_TRIPLE=aarch64-linux-gnu-"
 
-# ==================== [Step 1: 安装 SukiSU (Builtin)] ====================
-echo "⬇️ 安装 SukiSU (Builtin Mode)..."
+# ==================== [Step 1: 安装 SukiSU] ====================
+echo "⬇️ 安装 SukiSU (Builtin)..."
 curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 
-# ==================== [Step 2: 应用 v1.6 钩子] ====================
+# ==================== [Step 2: 应用钩子] ====================
 echo "🪝 应用 v1.6 Manual Hook..."
 wget https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/main/hooks/scope_min_manual_hooks_v1.6.patch -O sukisu_hooks.patch
 patch -p1 -F 3 < sukisu_hooks.patch || { echo "❌ 钩子补丁失败！"; exit 1; }
 
-# ==================== [Step 3: 注入代码 (补全所有缺失函数)] ====================
-echo "💉 注入变量和函数 (含 devpts, execveat_hook)..."
-# 注意：这里补全了 patch 里用到的所有 extern 变量和函数
+# ==================== [Step 3: 源码级修复 (必须保留)] ====================
+echo "💉 注入缺失的 C 函数 (devpts/execveat/read)..."
+# 这些是 patch 文件里 extern 引用的函数，必须在这里实体化，否则链接报错
 cat >> drivers/kernelsu/ksu.c <<'EOF'
 
 /* [INJECTED FIX] Restoring Missing Symbols for 4.19 Patch */
@@ -57,7 +58,7 @@ int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_pt
 }
 EXPORT_SYMBOL(ksu_handle_sys_read);
 
-// 2. EXECVE HOOK (修复：补全 bool 变量)
+// 2. EXECVE HOOK
 bool ksu_execveat_hook __read_mostly = true;
 EXPORT_SYMBOL(ksu_execveat_hook);
 int ksu_handle_execve_sucompat(int *fd, const char __user **filename_user, void *argv, void *envp, int *flags) { return 0; }
@@ -74,11 +75,11 @@ EXPORT_SYMBOL(ksu_input_hook);
 int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value) { return 0; }
 EXPORT_SYMBOL(ksu_handle_input_handle_event);
 
-// 4. DEVPTS HOOK (修复：补全 pty.c 需要的函数，之前漏了这个导致报错)
+// 4. DEVPTS HOOK
 int ksu_handle_devpts(struct inode *inode) { return 0; }
 EXPORT_SYMBOL(ksu_handle_devpts);
 
-// 5. OTHERS
+// 5. OTHERS (Faccessat, Stat, Reboot)
 extern int ksu_handle_faccessat_sucompat(int *dfd, const char __user **filename_user, int *mode, int *flags);
 int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags) {
     return ksu_handle_faccessat_sucompat(dfd, filename_user, mode, flags);
@@ -93,32 +94,30 @@ int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user 
 EXPORT_SYMBOL(ksu_handle_sys_reboot);
 EOF
 
-# 修复 flask.h 头文件路径
-echo "🔧 修复头文件引用..."
+# 修复 flask.h 头文件找不到的问题
 cat >> drivers/kernelsu/Makefile <<'EOF'
 ccflags-y += -I$(srctree)/security/selinux/include
 ccflags-y += -I$(objtree)/security/selinux/include
 ccflags-y += -I$(srctree)/security/selinux/ss
 EOF
 
-# ==================== [Step 4: 强制内置 (Fix Relocation)] ====================
-echo "🔒 执行强制内置策略..."
-# 暴力修改 SukiSU Makefile，无视配置，强制 obj-y
+# ==================== [Step 4: 强制链接 (Makefile修改)] ====================
+echo "🔒 锁定 Makefile 为 Built-in..."
+# 这一步是为了配合你在 config 里写的 CONFIG_KSU=y
+# 确保编译器真的把它编进去
 if [ -f "drivers/kernelsu/Makefile" ]; then
     sed -i 's/obj-$(CONFIG_KSU)/obj-y/g' drivers/kernelsu/Makefile
 fi
-# 暴力修改 Drivers Makefile，强行注册 kernelsu
 sed -i '/kernelsu/d' drivers/Makefile
 echo "obj-y += kernelsu/" >> drivers/Makefile
-echo "✅ 已锁定为 Built-in 模式。"
 
 # ==================== [Step 5: SUSFS 补丁] ====================
 echo "📦 应用 SUSFS 补丁..."
 wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch
 patch -p1 -F 3 < susfs.patch || { echo "❌ SUSFS 补丁失败！"; exit 1; }
 
-# ==================== [Step 6: DTS 屏幕/触控修复 (复刻老代码)] ====================
-echo "🔧 应用 DTS 屏幕与触控修复..."
+# ==================== [Step 6: DTS 屏幕/触控修复] ====================
+echo "🔧 应用 DTS 屏幕修复..."
 dts_source=arch/arm64/boot/dts/vendor/qcom
 cp -a ${dts_source} .dts.bak
 
@@ -174,23 +173,12 @@ sed -i 's/\/\/39 01 00 00 00 00 05 51 07 FF 00 00/39 01 00 00 00 00 05 51 07 FF 
 sed -i 's/\/\/39 01 00 00 01 00 03 51 03 FF/39 01 00 00 01 00 03 51 03 FF/g' ${dts_source}/dsi-panel-j11-38-08-0a-fhd-cmd.dtsi
 sed -i 's/\/\/39 01 00 00 11 00 03 51 03 FF/39 01 00 00 11 00 03 51 03 FF/g' ${dts_source}/dsi-panel-j2-p2-1-38-0c-0a-dsc-cmd.dtsi
 
-# ==================== [Step 7: 注入全能配置] ====================
-echo "⚙️ 注入配置 (KSU + SUSFS + MIUI)..."
-# 如果目录没有 custom_config.txt，先检查
-if [ -f "custom_config.txt" ]; then
-    cat >> arch/arm64/configs/${TARGET_DEVICE}_defconfig <<EOF
-$(cat custom_config.txt)
-EOF
-else
-    echo "❌ 错误：找不到 custom_config.txt！请确认该文件已创建。"
-    exit 1
-fi
-
-# 正式生成 .config
+# ==================== [Step 8: 编译] ====================
+echo "⚙️ 生成配置..."
+# 直接加载你修改好的 defconfig，不做任何 scripts/config 修改
 make $MAKE_ARGS ${TARGET_DEVICE}_defconfig
 
-# ==================== [Step 8: 开始编译] ====================
-echo "🚀 开始最终编译 (Full Compilation)..."
+echo "🚀 开始编译..."
 make $MAKE_ARGS -j$(nproc)
 
 if [ ! -f "out/arch/arm64/boot/Image" ]; then
@@ -198,7 +186,7 @@ if [ ! -f "out/arch/arm64/boot/Image" ]; then
     exit 1
 fi
 
-echo "✅ 编译成功！Image 已生成。"
+echo "✅ 编译成功！"
 echo "Generating dtb......"
 find out/arch/arm64/boot/dts -name '*.dtb' -exec cat {} + >out/arch/arm64/boot/dtb
 
