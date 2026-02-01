@@ -5,7 +5,6 @@ set -e
 
 # ==================== [Step 0: 环境清理] ====================
 echo "🧹 正在执行回滚清理..."
-# 按你的要求使用补丁回滚
 curl -L https://github.com/ApartTUSITU/kernel_xiaomi_sm8250_mod/commit/a05557c.patch | git apply -v || true
 rm -rf drivers/susfs
 rm -rf fs/susfs
@@ -25,18 +24,20 @@ export CXX="ccache g++"
 export PATH="/usr/lib/ccache:$PATH"
 MAKE_ARGS="ARCH=arm64 SUBARCH=arm64 O=out CC=clang CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- CLANG_TRIPLE=aarch64-linux-gnu-"
 
-# ==================== [Step 1: 安装 SukiSU] ====================
+# ==================== [Step 1: 插件安装与补丁] ====================
 echo "⬇️ 安装 SukiSU (Builtin)..."
 curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 
-# ==================== [Step 2: 应用钩子] ====================
 echo "🪝 应用 v1.6 Manual Hook..."
 wget https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/main/hooks/scope_min_manual_hooks_v1.6.patch -O sukisu_hooks.patch
 patch -p1 -F 3 < sukisu_hooks.patch || { echo "❌ 钩子补丁失败！"; exit 1; }
 
-# ==================== [Step 3: 源码级修复 (必须保留)] ====================
-echo "💉 注入缺失的 C 函数 (devpts/execveat/read)..."
-# 这些是 patch 文件里 extern 引用的函数，必须在这里实体化，否则链接报错
+echo "📦 应用 SUSFS 补丁..."
+wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch
+patch -p1 -F 3 < susfs.patch || { echo "❌ SUSFS 补丁失败！"; exit 1; }
+
+# ==================== [Step 2: 关键代码注入 (你的救命药)] ====================
+echo "💉 注入缺失函数 (这是防止最后报错的关键)..."
 cat >> drivers/kernelsu/ksu.c <<'EOF'
 
 /* [INJECTED FIX] Restoring Missing Symbols for 4.19 Patch */
@@ -79,7 +80,7 @@ EXPORT_SYMBOL(ksu_handle_input_handle_event);
 int ksu_handle_devpts(struct inode *inode) { return 0; }
 EXPORT_SYMBOL(ksu_handle_devpts);
 
-// 5. OTHERS (Faccessat, Stat, Reboot)
+// 5. OTHERS
 extern int ksu_handle_faccessat_sucompat(int *dfd, const char __user **filename_user, int *mode, int *flags);
 int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags) {
     return ksu_handle_faccessat_sucompat(dfd, filename_user, mode, flags);
@@ -94,34 +95,25 @@ int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user 
 EXPORT_SYMBOL(ksu_handle_sys_reboot);
 EOF
 
-# 修复 flask.h 头文件找不到的问题
+# 修复头文件
 cat >> drivers/kernelsu/Makefile <<'EOF'
 ccflags-y += -I$(srctree)/security/selinux/include
 ccflags-y += -I$(objtree)/security/selinux/include
 ccflags-y += -I$(srctree)/security/selinux/ss
 EOF
 
-# ==================== [Step 4: 强制链接 (Makefile修改)] ====================
-echo "🔒 锁定 Makefile 为 Built-in..."
-# 这一步是为了配合你在 config 里写的 CONFIG_KSU=y
-# 确保编译器真的把它编进去
+# 强制 Makefile
+echo "🔒 锁定 Makefile..."
 if [ -f "drivers/kernelsu/Makefile" ]; then
     sed -i 's/obj-$(CONFIG_KSU)/obj-y/g' drivers/kernelsu/Makefile
 fi
 sed -i '/kernelsu/d' drivers/Makefile
 echo "obj-y += kernelsu/" >> drivers/Makefile
 
-# ==================== [Step 5: SUSFS 补丁] ====================
-echo "📦 应用 SUSFS 补丁..."
-wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch
-patch -p1 -F 3 < susfs.patch || { echo "❌ SUSFS 补丁失败！"; exit 1; }
-
-# ==================== [Step 6: DTS 屏幕/触控修复] ====================
-echo "🔧 应用 DTS 屏幕修复..."
+# 修复 DTS
+echo "🔧 应用 DTS 修复..."
 dts_source=arch/arm64/boot/dts/vendor/qcom
 cp -a ${dts_source} .dts.bak
-
-# 分辨率与面板修正
 sed -i 's/<154>/<1537>/g' ${dts_source}/dsi-panel-j1s*
 sed -i 's/<154>/<1537>/g' ${dts_source}/dsi-panel-j2*
 sed -i 's/<155>/<1544>/g' ${dts_source}/dsi-panel-j3s-37-02-0a-dsc-video.dtsi
@@ -134,20 +126,14 @@ sed -i 's/<70>/<695>/g' ${dts_source}/dsi-panel-k11a-38-08-0a-dsc-cmd.dtsi
 sed -i 's/<70>/<695>/g' ${dts_source}/dsi-panel-l11r-38-08-0a-dsc-cmd.dtsi
 sed -i 's/<71>/<710>/g' ${dts_source}/dsi-panel-j1s*
 sed -i 's/<71>/<710>/g' ${dts_source}/dsi-panel-j2*
-
-# SmartFPS 恢复
 sed -i 's/\/\/ mi,mdss-dsi-pan-enable-smart-fps/mi,mdss-dsi-pan-enable-smart-fps/g' ${dts_source}/dsi-panel*
 sed -i 's/\/\/ mi,mdss-dsi-smart-fps-max_framerate/mi,mdss-dsi-smart-fps-max_framerate/g' ${dts_source}/dsi-panel*
 sed -i 's/\/\/ qcom,mdss-dsi-pan-enable-smart-fps/qcom,mdss-dsi-pan-enable-smart-fps/g' ${dts_source}/dsi-panel*
 sed -i 's/qcom,mdss-dsi-qsync-min-refresh-rate/\/\/qcom,mdss-dsi-qsync-min-refresh-rate/g' ${dts_source}/dsi-panel*
-
-# 刷新率策略修正
 sed -i 's/120 90 60/120 90 60 50 30/g' ${dts_source}/dsi-panel-g7a-36-02-0c-dsc-video.dtsi
 sed -i 's/120 90 60/120 90 60 50 30/g' ${dts_source}/dsi-panel-g7a-37-02-0a-dsc-video.dtsi
 sed -i 's/120 90 60/120 90 60 50 30/g' ${dts_source}/dsi-panel-g7a-37-02-0b-dsc-video.dtsi
 sed -i 's/144 120 90 60/144 120 90 60 50 48 30/g' ${dts_source}/dsi-panel-j3s-37-02-0a-dsc-video.dtsi
-
-# 亮度控制恢复
 sed -i 's/\/\/39 00 00 00 00 00 03 51 03 FF/39 00 00 00 00 00 03 51 03 FF/g' ${dts_source}/dsi-panel-j9-38-0a-0a-fhd-video.dtsi
 sed -i 's/\/\/39 00 00 00 00 00 03 51 0D FF/39 00 00 00 00 00 03 51 0D FF/g' ${dts_source}/dsi-panel-j2-p2-1-38-0c-0a-dsc-cmd.dtsi
 sed -i 's/\/\/39 00 00 00 00 00 05 51 0F 8F 00 00/39 00 00 00 00 00 05 51 0F 8F 00 00/g' ${dts_source}/dsi-panel-j1s-42-02-0a-dsc-cmd.dtsi
@@ -173,12 +159,34 @@ sed -i 's/\/\/39 01 00 00 00 00 05 51 07 FF 00 00/39 01 00 00 00 00 05 51 07 FF 
 sed -i 's/\/\/39 01 00 00 01 00 03 51 03 FF/39 01 00 00 01 00 03 51 03 FF/g' ${dts_source}/dsi-panel-j11-38-08-0a-fhd-cmd.dtsi
 sed -i 's/\/\/39 01 00 00 11 00 03 51 03 FF/39 01 00 00 11 00 03 51 03 FF/g' ${dts_source}/dsi-panel-j2-p2-1-38-0c-0a-dsc-cmd.dtsi
 
-# ==================== [Step 8: 编译] ====================
-echo "⚙️ 生成配置..."
-# 直接加载你修改好的 defconfig，不做任何 scripts/config 修改
-make $MAKE_ARGS ${TARGET_DEVICE}_defconfig
+# ==================== [Step 7: ⚡️ 光速质检 (你要求的)] ====================
+echo "⚡️ 正在进行光速质检 (只编译驱动，不编译全内核)..."
+echo "   这个步骤大约需要 1-2 分钟。如果报错，会立刻停止！"
 
-echo "🚀 开始编译..."
+make $MAKE_ARGS ${TARGET_DEVICE}_defconfig > /dev/null
+
+# 1. 尝试单独编译 SukiSU
+# 只要这一步过了，说明 99% 的 undefined reference 问题都解决了
+make $MAKE_ARGS drivers/kernelsu/
+
+# 2. 检查产物
+if [ ! -f "out/drivers/kernelsu/ksu.o" ]; then
+    echo "❌ [质检失败] SukiSU 驱动根本没编出来！"
+    exit 1
+fi
+
+# 3. 检查符号 (double check)
+# 只要 grep 找到了 ksu_vfs_read_hook 符号，说明代码注入成功
+if nm out/drivers/kernelsu/ksu.o | grep -q "ksu_vfs_read_hook"; then
+    echo "✅ [质检通过] SukiSU 驱动编译成功且符号存在！"
+    echo "🚀 放心了，开始完整编译..."
+else
+    echo "❌ [质检失败] 驱动编出来了，但是没有找到 ksu_vfs_read_hook 符号！"
+    echo "   这意味着代码注入没生效，后面肯定会报错。"
+    exit 1
+fi
+
+# ==================== [Step 8: 完整编译] ====================
 make $MAKE_ARGS -j$(nproc)
 
 if [ ! -f "out/arch/arm64/boot/Image" ]; then
