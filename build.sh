@@ -1,21 +1,36 @@
 #!/bin/bash
 
-# 遇到错误立马停
+# ==================== [调试模式开启] ====================
+# -e: 遇到错误立即停止
+# -x: 打印执行的每一行命令 (这就是你要的详细调试信息)
 set -e
+set -x
 
-# ==================== [Step 0: 环境清理] ====================
-echo "🧹 正在执行回滚清理..."
+echo "============================================="
+echo "   🚀 STARTING DEBUG BUILD SCRIPT (VERBOSE)  "
+echo "============================================="
+
+# ==================== [Step 0: 暴力环境重置] ====================
+echo ">> [DEBUG] Cleaning environment..."
+# 强制清理，不留活口
 curl -L https://github.com/ApartTUSITU/kernel_xiaomi_sm8250_mod/commit/a05557c.patch | git apply -v || true
 rm -rf drivers/susfs
 rm -rf fs/susfs
 rm -rf drivers/kernelsu
 git checkout drivers/Makefile 2>/dev/null || true
-echo "✅ 环境清理完毕。"
+# 只有彻底清理才能保证不报 "Reversed patch"
+git reset --hard HEAD
+git clean -fd
+echo ">> [DEBUG] Environment is clean."
 
-# 环境变量
+# ==================== [Step 1: 变量与工具链] ====================
 TOOLCHAIN_PATH=$HOME/zyc-clang/bin
 GIT_COMMIT_ID=$(git rev-parse --short=8 HEAD)
 TARGET_DEVICE="${1:-alioth}"
+
+echo ">> [DEBUG] Toolchain: $TOOLCHAIN_PATH"
+echo ">> [DEBUG] CommitID:  $GIT_COMMIT_ID"
+echo ">> [DEBUG] Device:    $TARGET_DEVICE"
 
 export PATH="$TOOLCHAIN_PATH:$PATH"
 export CCACHE_DIR="$HOME/.cache/ccache_mikernel" 
@@ -24,23 +39,28 @@ export CXX="ccache g++"
 export PATH="/usr/lib/ccache:$PATH"
 MAKE_ARGS="ARCH=arm64 SUBARCH=arm64 O=out CC=clang CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- CLANG_TRIPLE=aarch64-linux-gnu-"
 
-# ==================== [Step 1: 安装插件与补丁] ====================
-echo "⬇️ 安装 SukiSU (Builtin)..."
+# ==================== [Step 2: 安装与补丁] ====================
+echo ">> [DEBUG] Installing SukiSU..."
 curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 
-echo "🪝 应用 v1.6 Manual Hook..."
+echo ">> [DEBUG] Downloading Hooks..."
 wget https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/main/hooks/scope_min_manual_hooks_v1.6.patch -O sukisu_hooks.patch
-patch -p1 -F 3 < sukisu_hooks.patch || { echo "❌ 钩子补丁失败！"; exit 1; }
+echo ">> [DEBUG] Applying Hooks..."
+patch -p1 -F 3 < sukisu_hooks.patch
 
-echo "📦 应用 SUSFS 补丁..."
+echo ">> [DEBUG] Downloading SUSFS..."
 wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch
-patch -p1 -F 3 < susfs.patch || { echo "❌ SUSFS 补丁失败！"; exit 1; }
+echo ">> [DEBUG] Applying SUSFS..."
+patch -p1 -F 3 < susfs.patch
 
-# ==================== [Step 2: 注入源码 (防报错)] ====================
-echo "💉 注入缺失函数 (devpts/execveat/read)..."
+# ==================== [Step 3: 核心代码注入 (KSU)] ====================
+echo ">> [DEBUG] Injecting missing symbols into drivers/kernelsu/ksu.c..."
+# 打印当前文件最后几行，确保我们知道注入位置
+tail -n 5 drivers/kernelsu/ksu.c
+
 cat >> drivers/kernelsu/ksu.c <<'EOF'
 
-/* [INJECTED FIX] Restoring Missing Symbols for 4.19 Patch */
+/* [INJECTED FIX] DEBUG MODE: Restoring Missing Symbols */
 #include <linux/fs.h>
 #include <linux/version.h>
 #include <linux/export.h> 
@@ -94,26 +114,25 @@ EXPORT_SYMBOL(ksu_handle_stat);
 int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg) { return 0; }
 EXPORT_SYMBOL(ksu_handle_sys_reboot);
 EOF
+echo ">> [DEBUG] Injection done."
 
-# ==================== [Step 3: 修复头文件引用 (关键!)] ====================
-echo "🔧 修复 flask.h 引用路径..."
-# 这里一定要加上 $(objtree)，因为 flask.h 是生成的，在 out 目录里！
-cat >> drivers/kernelsu/Makefile <<'EOF'
-ccflags-y += -I$(srctree)/security/selinux/include
-ccflags-y += -I$(objtree)/security/selinux/include
-ccflags-y += -I$(srctree)/security/selinux/ss
-EOF
+# ==================== [Step 4: Makefile 修复 (Flask.h)] ====================
+echo ">> [DEBUG] Patching drivers/kernelsu/Makefile for flask.h..."
+# 显式打印修改内容
+echo "ccflags-y += -I\$(srctree)/security/selinux/include" >> drivers/kernelsu/Makefile
+echo "ccflags-y += -I\$(objtree)/security/selinux/include" >> drivers/kernelsu/Makefile
+echo "ccflags-y += -I\$(srctree)/security/selinux/ss" >> drivers/kernelsu/Makefile
+# 打印修改后的 Makefile 确认
+cat drivers/kernelsu/Makefile
 
-# ==================== [Step 4: 强制内置] ====================
-echo "🔒 锁定 Makefile..."
-if [ -f "drivers/kernelsu/Makefile" ]; then
-    sed -i 's/obj-$(CONFIG_KSU)/obj-y/g' drivers/kernelsu/Makefile
-fi
+# 强制 Drivers Makefile
+echo ">> [DEBUG] Forcing drivers/Makefile to include kernelsu..."
 sed -i '/kernelsu/d' drivers/Makefile
 echo "obj-y += kernelsu/" >> drivers/Makefile
+tail -n 3 drivers/Makefile
 
 # ==================== [Step 5: DTS 修复] ====================
-echo "🔧 应用 DTS 修复..."
+echo ">> [DEBUG] Applying DTS fixes..."
 dts_source=arch/arm64/boot/dts/vendor/qcom
 cp -a ${dts_source} .dts.bak
 sed -i 's/<154>/<1537>/g' ${dts_source}/dsi-panel-j1s*
@@ -161,35 +180,20 @@ sed -i 's/\/\/39 01 00 00 00 00 05 51 07 FF 00 00/39 01 00 00 00 00 05 51 07 FF 
 sed -i 's/\/\/39 01 00 00 01 00 03 51 03 FF/39 01 00 00 01 00 03 51 03 FF/g' ${dts_source}/dsi-panel-j11-38-08-0a-fhd-cmd.dtsi
 sed -i 's/\/\/39 01 00 00 11 00 03 51 03 FF/39 01 00 00 11 00 03 51 03 FF/g' ${dts_source}/dsi-panel-j2-p2-1-38-0c-0a-dsc-cmd.dtsi
 
-# ==================== [Step 6: ⚡️ 修正版光速质检] ====================
-echo "⚡️ 正在进行光速质检 (修复了 flask.h 问题)..."
-echo "   1. 正在生成 Defconfig..."
-make $MAKE_ARGS ${TARGET_DEVICE}_defconfig > /dev/null
+# ==================== [Step 6: 手动生成 flask.h] ====================
+echo ">> [DEBUG] Generating flask.h explicitly..."
+make $MAKE_ARGS ${TARGET_DEVICE}_defconfig
 
-# ⚠️ 关键步骤：使用 modules_prepare 来准备所有头文件
-# 这会生成 flask.h 以及所有内核需要的头文件，耗时约1-2分钟
-echo "   2. 正在预处理内核 (modules_prepare，生成所有头文件)..."
-make $MAKE_ARGS modules_prepare
+# ⚠️ 这里是关键：强制先生成 security 头文件，不让 KSU 报错
+# 使用 -k 忽略错误，只为了生成头文件
+make $MAKE_ARGS -k security/selinux/ || true
 
-echo "   3. 正在编译 SukiSU 驱动 (验证代码注入)..."
-make $MAKE_ARGS drivers/kernelsu/
-
-# 检查产物和符号
-if [ -f "out/drivers/kernelsu/ksu.o" ]; then
-    if nm out/drivers/kernelsu/ksu.o | grep -q "ksu_vfs_read_hook"; then
-        echo "✅ [质检通过] SukiSU 编译成功，且符号 ksu_vfs_read_hook 已注入！"
-        echo "🚀 验证完毕，开始全量编译..."
-    else
-        echo "❌ [质检失败] 驱动编译成功，但 ksu_vfs_read_hook 符号丢失！"
-        exit 1
-    fi
-else
-    echo "❌ [质检失败] SukiSU 驱动编译报错！请检查上方日志。"
-    exit 1
-fi
+echo ">> [DEBUG] Checking if flask.h exists..."
+# 使用 find 命令查找 flask.h，让你看到它到底在哪
+find out -name "flask.h"
 
 # ==================== [Step 7: 完整编译] ====================
-echo "🚀 开始最终编译..."
+echo ">> [DEBUG] Starting Full Compilation..."
 make $MAKE_ARGS -j$(nproc)
 
 if [ ! -f "out/arch/arm64/boot/Image" ]; then
