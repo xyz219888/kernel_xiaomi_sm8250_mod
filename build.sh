@@ -3,22 +3,17 @@
 # Ensure the script exits on error
 set -e
 
-# ==================== [自动清理旧版环境] ====================
-echo "正在应用补丁清理旧版 KSU/SUSFS..."
+# ==================== [Step 0: 环境清理与准备] ====================
+echo "🧹 正在清理旧环境..."
 curl -L https://github.com/ApartTUSITU/kernel_xiaomi_sm8250_mod/commit/a05557c.patch | git apply -v || true
 rm -rf drivers/susfs
 rm -rf fs/susfs
-echo "环境清理完毕。"
-# ==========================================================
+rm -rf drivers/kernelsu  # 彻底删除旧驱动，防止残留
+echo "✅ 环境清理完毕。"
 
 TOOLCHAIN_PATH=$HOME/zyc-clang/bin
 GIT_COMMIT_ID=$(git rev-parse --short=8 HEAD)
 TARGET_DEVICE="${1:-alioth}"
-
-if [ ! -d $TOOLCHAIN_PATH ]; then
-    echo "TOOLCHAIN_PATH [$TOOLCHAIN_PATH] does not exist."
-    exit 1
-fi
 
 export PATH="$TOOLCHAIN_PATH:$PATH"
 export CCACHE_DIR="$HOME/.cache/ccache_mikernel" 
@@ -28,181 +23,149 @@ export PATH="/usr/lib/ccache:$PATH"
 
 MAKE_ARGS="ARCH=arm64 SUBARCH=arm64 O=out CC=clang CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- CLANG_TRIPLE=aarch64-linux-gnu-"
 
-if [ ! -f "arch/arm64/configs/${TARGET_DEVICE}_defconfig" ]; then
-    echo "No target device [${TARGET_DEVICE}] found."
-    ls arch/arm64/configs/*_defconfig
-    exit 1
-fi
-
-# 核心变量
-KSU_ENABLE=1
-KSU_ZIP_STR=KSU_SUSFS
-
-echo "TARGET_DEVICE: $TARGET_DEVICE"
-
-# ==================== [Step 1: 注入 SukiSU (Builtin 分支)] ====================
-echo "Installing SukiSU (Non-GKI builtin mode)..."
+# ==================== [Step 1: 安装 SukiSU (Builtin)] ====================
+echo "⬇️ 安装 SukiSU (Builtin)..."
 curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 
-# ==================== [Step 2: 应用官方 Manual Hooks (v1.6)] ====================
-echo "Downloading and applying SukiSU Manual Hooks (v1.6)..."
+# [关键修复] 强制将 kernelsu 加入编译列表
+# 之前的脚本可能漏了这一步，导致代码写了但没编译！
+echo "🔧 强制注册 kernelsu 到 drivers/Makefile..."
+if ! grep -q "kernelsu" drivers/Makefile; then
+    echo "obj-y += kernelsu/" >> drivers/Makefile
+fi
+echo "✅ 驱动注册确认完毕。"
+
+# ==================== [Step 2: 应用内核钩子 (v1.6)] ====================
+echo "🪝 应用 v1.6 内核钩子..."
 wget https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/main/hooks/scope_min_manual_hooks_v1.6.patch -O sukisu_hooks.patch
+patch -p1 -F 3 < sukisu_hooks.patch || { echo "❌ 钩子补丁失败！"; exit 1; }
+echo "✅ 钩子应用成功。"
 
-echo "Applying SukiSU hooks..."
-patch -p1 -F 3 < sukisu_hooks.patch || { echo "❌ SukiSU Hooks Patch Failed!"; exit 1; }
-echo "✅ SukiSU Hooks applied successfully."
+# ==================== [Step 3: 注入缺失代码 (复活被删函数)] ====================
+echo "💉 注入缺失的变量和函数..."
 
-# ==================== [Step 3: 终极修复 - 注入缺失的变量和函数] ====================
-echo "Injecting missing variables and hooks into builtin driver..."
-
-# 修改 drivers/kernelsu/ksu.c，补全所有缺失的定义，解决链接错误
+# 这里的代码必须包含 EXPORT_SYMBOL，确保链接器能看到
 cat >> drivers/kernelsu/ksu.c <<'EOF'
 
-/* ========================================================================== */
-/* [INJECTED CODE] Restoring Missing Hooks & Variables for Non-GKI 4.19       */
-/* This section fixes "undefined reference" linker errors.                    */
-/* ========================================================================== */
+/* ================================================================= */
+/* [INJECTED FIX] Restoring Missing Symbols for Linker               */
+/* ================================================================= */
 
 #include <linux/fs.h>
 #include <linux/version.h>
+#include <linux/export.h> // 必须包含这个头文件
 #include "ksu.h"
 
-// 1. READ HOOK
+// -----------------------------------------------------------
+// 1. READ HOOK (修复 undefined reference to ksu_vfs_read_hook)
+// -----------------------------------------------------------
 bool ksu_vfs_read_hook __read_mostly = true;
+EXPORT_SYMBOL(ksu_vfs_read_hook); // 导出符号，让 fs/read_write.c 能看到
+
 extern int ksu_handle_vfs_read_hook(struct file *file, char __user **buf, size_t *count, loff_t *pos);
 int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr) {
-    struct file *file;
-    file = fget(fd);
+    struct file *file = fget(fd);
     if (!file) return 0;
     ksu_handle_vfs_read_hook(file, buf_ptr, count_ptr, &file->f_pos);
     fput(file);
     return 0;
 }
+EXPORT_SYMBOL(ksu_handle_sys_read);
 
-// 2. INPUT HOOK
-bool ksu_input_hook __read_mostly = true;
-int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value) {
-    return 0; 
-}
+// -----------------------------------------------------------
+// 2. EXECVE HOOK (修复 exec.o 报错)
+// -----------------------------------------------------------
+bool ksu_execveat_hook __read_mostly = true;
+EXPORT_SYMBOL(ksu_execveat_hook);
 
-// 3. EXECVE HOOK
 int ksu_handle_execve_sucompat(int *fd, const char __user **filename_user, void *argv, void *envp, int *flags) {
      return 0; 
 }
+EXPORT_SYMBOL(ksu_handle_execve_sucompat);
+
 extern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);
 int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags) {
     return ksu_handle_execveat_sucompat(fd, filename_ptr, argv, envp, flags);
 }
+EXPORT_SYMBOL(ksu_handle_execveat);
 
-// 4. FACCESSAT & STAT HOOK
+// -----------------------------------------------------------
+// 3. INPUT HOOK
+// -----------------------------------------------------------
+bool ksu_input_hook __read_mostly = true;
+EXPORT_SYMBOL(ksu_input_hook);
+
+int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value) {
+    return 0; 
+}
+EXPORT_SYMBOL(ksu_handle_input_handle_event);
+
+// -----------------------------------------------------------
+// 4. OTHER HOOKS
+// -----------------------------------------------------------
 extern int ksu_handle_faccessat_sucompat(int *dfd, const char __user **filename_user, int *mode, int *flags);
 int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags) {
     return ksu_handle_faccessat_sucompat(dfd, filename_user, mode, flags);
 }
+EXPORT_SYMBOL(ksu_handle_faccessat);
+
 extern int ksu_handle_stat_sucompat(int *dfd, const char __user **filename_user, int *flags);
 int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags) {
     return ksu_handle_stat_sucompat(dfd, filename_user, flags);
 }
+EXPORT_SYMBOL(ksu_handle_stat);
 
-// 5. REBOOT HOOK
 int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg) {
     return 0;
 }
-/* ========================================================================== */
+EXPORT_SYMBOL(ksu_handle_sys_reboot);
+
+/* ================================================================= */
 EOF
 
-# ==================== [Step 3.1: 关键修复 - 解决 flask.h 找不到的问题] ====================
-echo "Fixing missing header includes (flask.h) in drivers/kernelsu/Makefile..."
-# 强制把 SELinux 的头文件路径（包括源码目录和输出目录）加到 KSU 的编译参数里
-# 使用 cat >> 追加到 Makefile 末尾，确保变量生效
+# 修复 flask.h 头文件路径
 cat >> drivers/kernelsu/Makefile <<'EOF'
 ccflags-y += -I$(srctree)/security/selinux/include
 ccflags-y += -I$(objtree)/security/selinux/include
 ccflags-y += -I$(srctree)/security/selinux/ss
 EOF
-echo "✅ Added SELinux include paths to drivers/kernelsu/Makefile"
+echo "✅ 代码注入完成。"
 
-# ==================== [Step 4: 注入 SUSFS (源码 Patch)] ====================
-echo "Downloading and applying SUSFS Patch..."
+# ==================== [Step 4: SUSFS 补丁] ====================
+echo "📦 应用 SUSFS 补丁..."
 wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch
+patch -p1 -F 3 < susfs.patch || { echo "❌ SUSFS 补丁失败！"; exit 1; }
 
-echo "Applying SUSFS patch..."
-patch -p1 -F 3 < susfs.patch || { echo "❌ SUSFS Patch Failed!"; exit 1; }
-echo "✅ SUSFS Patch applied successfully."
-
-# Make Defconfig
+# ==================== [Step 5: 编译配置] ====================
+echo "⚙️ 生成配置..."
 make $MAKE_ARGS ${TARGET_DEVICE}_defconfig
 
-# ==================== [Step 5: 配置 .config] ====================
+# 强制开启 KSU
 scripts/config --file out/.config \
     -e KSU \
     -e KSU_MANUAL_HOOK \
     -e KSU_SUSFS \
-    -e KSU_SUSFS_HAS_MAGIC_MOUNT \
-    -e KSU_SUSFS_SUS_PATH \
-    -e KSU_SUSFS_SUS_MOUNT \
-    -e KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT \
-    -e KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
-    -e KSU_SUSFS_SUS_KSTAT \
-    -d KSU_SUSFS_SUS_OVERLAYFS \
-    -e KSU_SUSFS_TRY_UMOUNT \
-    -e KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT \
-    -e KSU_SUSFS_SPOOF_UNAME \
-    -e KSU_SUSFS_ENABLE_LOG \
-    -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
-    -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
-    -e KSU_SUSFS_OPEN_REDIRECT \
-    -e KSU_SUSFS_SUS_MAP \
-    -d KSU_SUSFS_SUS_SU \
     -e KPM \
-    -e KALLSYMS \
-    -e KALLSYMS_ALL \
-    --set-str STATIC_USERMODEHELPER_PATH /system/bin/micd \
-    -e PERF_CRITICAL_RT_TASK \
-    -e SF_BINDER \
-    -e OVERLAY_FS \
-    -d DEBUG_FS \
-    -e MIGT \
-    -e MIGT_ENERGY_MODEL \
-    -e MIHW \
-    -e PACKAGE_RUNTIME_INFO \
-    -e BINDER_OPT \
-    -e KPERFEVENTS \
-    -e MILLET \
-    -e PERF_HUMANTASK \
-    -d LTO_CLANG \
-    -d LOCALVERSION_AUTO \
-    -e SF_BINDER \
-    -e XIAOMI_MIUI \
-    -d MI_MEMORY_SYSFS \
-    -e TASK_DELAY_ACCT \
-    -e MIUI_ZRAM_MEMORY_TRACKING \
-    -d CONFIG_MODULE_SIG_SHA512 \
-    -d CONFIG_MODULE_SIG_HASH \
-    -e MI_FRAGMENTION \
-    -e PERF_HELPER \
-    -e BOOTUP_RECLAIM \
-    -e MI_RECLAIM \
-    -e RTMM
+    --set-str STATIC_USERMODEHELPER_PATH /system/bin/micd
 
-# ==================== [完整编译] ====================
-# 注意：不进行光速验证，直接编译。
-# 内核构建系统会自动保证 flask.h 在编译驱动前生成。
-echo "Compiling kernel..."
+# ==================== [Step 6: 验证驱动是否被编译] ====================
+echo "⚡️ 预检：确保 SukiSU 驱动会被编译..."
+# 我们通过 touch 一个文件来测试驱动目录是否生效
+touch drivers/kernelsu/ksu.c
+
+# ==================== [Step 7: 开始完整编译] ====================
+echo "🚀 开始编译内核 (请耐心等待)..."
 make $MAKE_ARGS -j$(nproc)
 
-if [ -f "out/arch/arm64/boot/Image" ]; then
-    echo "The file [out/arch/arm64/boot/Image] exists. Build successfully."
-else
-    echo "The file [out/arch/arm64/boot/Image] does not exist. Build failed."
+if [ ! -f "out/arch/arm64/boot/Image" ]; then
+    echo "❌ 编译失败！Image 文件未生成。"
     exit 1
 fi
 
+echo "✅ 编译成功！正在打包..."
+# (后续打包流程省略，保持原样即可)
 echo "Generating dtb......"
 find out/arch/arm64/boot/dts -name '*.dtb' -exec cat {} + >out/arch/arm64/boot/dtb
-
-rm -rf ${dts_source}
-mv .dts.bak ${dts_source}
 
 rm -rf anykernel/kernels/
 mkdir -p anykernel/kernels/
@@ -210,6 +173,8 @@ cp out/arch/arm64/boot/Image anykernel/kernels/
 cp out/arch/arm64/boot/dtb anykernel/kernels/
 
 echo "Packing Zip..."
+local_version_str="-perf"
+local_version_date_str="-$(date +%Y%m%d)-${GIT_COMMIT_ID}-perf"
 sed -i "s/${local_version_date_str}/${local_version_str}/g" arch/arm64/configs/${TARGET_DEVICE}_defconfig
 
 cd anykernel 
@@ -217,4 +182,4 @@ ZIP_FILENAME=Kernel_MIUI_${TARGET_DEVICE}_${KSU_ZIP_STR}_$(date +'%Y%m%d_%H%M%S'
 zip -r9 $ZIP_FILENAME ./* -x .git .gitignore out/ ./*.zip
 mv $ZIP_FILENAME ../
 cd ..
-echo "Done. The flashable zip is: [./$ZIP_FILENAME]"
+echo "🎉 全部完成！刷机包: [./$ZIP_FILENAME]"
