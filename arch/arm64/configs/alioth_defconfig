@@ -775,9 +775,23 @@ CONFIG_SCHEDSTATS=y
 CONFIG_DEBUG_LIST=y
 CONFIG_IPC_LOGGING=y
 CONFIG_CC_WERROR=y
+CONFIG_DEBUG_ALIGN_RODATA=y
+CONFIG_CORESIGHT=y
+CONFIG_CORESIGHT_LINK_AND_SINK_TMC=y
+CONFIG_CORESIGHT_DYNAMIC_REPLICATOR=y
+CONFIG_CORESIGHT_STM=y
+CONFIG_CORESIGHT_CTI=y
+CONFIG_CORESIGHT_CTI_SAVE_DISABLE=y
+CONFIG_CORESIGHT_TPDA=y
+CONFIG_CORESIGHT_TPDM=y
+CONFIG_CORESIGHT_HWEVENT=y
+CONFIG_CORESIGHT_DUMMY=y
+CONFIG_CORESIGHT_REMOTE_ETM=y
+CONFIG_CORESIGHT_TGU=y
+CONFIG_TECHPACK_CAMERA_XIAOMI=y
 
 # =========================================================
-# 1. KernelSU & SUSFS 核心 (强制内置，解决 Relocation 报错)
+# 1. SukiSU & SUSFS 核心 (强制内置 Y，解决 Relocation 报错)
 # =========================================================
 CONFIG_KSU=y
 CONFIG_KSU_MANUAL_HOOK=y
@@ -799,7 +813,7 @@ CONFIG_KSU_SUSFS_SUS_MAP=y
 CONFIG_KPM=y
 
 # =========================================================
-# 2. 基础依赖 (OverlayFS, Kallsyms, UserHelper)
+# 2. 基础依赖 (OverlayFS, 符号表, UserHelper)
 # =========================================================
 CONFIG_KALLSYMS=y
 CONFIG_KALLSYMS_ALL=y
@@ -808,7 +822,7 @@ CONFIG_STATIC_USERMODEHELPER=y
 CONFIG_STATIC_USERMODEHELPER_PATH="/system/bin/micd"
 
 # =========================================================
-# 3. MIUI 专属性能与功能优化 (从你的老代码 1:1 找回)
+# 3. MIUI 专属性能与功能优化 (1:1 复刻你的老代码)
 # =========================================================
 CONFIG_XIAOMI_MIUI=y
 CONFIG_MIGT=y
@@ -832,7 +846,7 @@ CONFIG_TOUCHSCREEN_XIAOMI_TOUCHFEATURE=y
 CONFIG_INPUT_XIAOMI_KEYBOARD=y
 
 # =========================================================
-# 4. 关闭项与防检测 (从你的老代码 1:1 找回)
+# 4. 关闭项与防检测 (1:1 复刻你的老代码)
 # =========================================================
 # CONFIG_DEBUG_FS is not set
 # CONFIG_LTO_CLANG is not set
@@ -842,17 +856,3 @@ CONFIG_INPUT_XIAOMI_KEYBOARD=y
 # CONFIG_MODULE_SIG_HASH is not set
 # CONFIG_KSU_SUSFS_SUS_OVERLAYFS is not set
 # CONFIG_KSU_SUSFS_SUS_SU is not set
-CONFIG_DEBUG_ALIGN_RODATA=y
-CONFIG_CORESIGHT=y
-CONFIG_CORESIGHT_LINK_AND_SINK_TMC=y
-CONFIG_CORESIGHT_DYNAMIC_REPLICATOR=y
-CONFIG_CORESIGHT_STM=y
-CONFIG_CORESIGHT_CTI=y
-CONFIG_CORESIGHT_CTI_SAVE_DISABLE=y
-CONFIG_CORESIGHT_TPDA=y
-CONFIG_CORESIGHT_TPDM=y
-CONFIG_CORESIGHT_HWEVENT=y
-CONFIG_CORESIGHT_DUMMY=y
-CONFIG_CORESIGHT_REMOTE_ETM=y
-CONFIG_CORESIGHT_TGU=y
-CONFIG_TECHPACK_CAMERA_XIAOMI=y
