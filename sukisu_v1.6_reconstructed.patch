@@ -1,0 +1,137 @@
+From 98345832aea56695842622081cb0d2ff7963157d Mon Sep 17 00:00:00 2001
+From: SukiSU-Refactored <admin@sukisu.io>
+Date: Tue, 03 Feb 2026 03:00:00 +0800
+Subject: [PATCH] SukiSU Manual Hooks (Refactored for Built-in)
+
+Adapts to SukiSU v0.7+ / Built-in architecture:
+- Hooks do_execve instead of sys_execve for direct struct filename access.
+- Drops deprecated vfs_read_hook (handled by SUSFS).
+- Drops deprecated input_hook.
+- Keeps stat/faccessat/reboot hooks.
+
+---
+ fs/exec.c       | 15 +++++++++++++++
+ fs/open.c       |  9 +++++++++
+ fs/stat.c       | 13 +++++++++++++
+ kernel/reboot.c |  9 +++++++++
+ 4 files changed, 46 insertions(+)
+
+diff --git a/fs/exec.c b/fs/exec.c
+index b1b9db56a..e90e89f29 100644
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -1888,11 +1888,26 @@ static int __do_execve_file(int fd, struct filename *filename,
+ 	return retval;
+ }
+ 
++#ifdef CONFIG_KSU
++extern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr,
++					void *argv, void *envp, int *flags);
++#endif
++
+ int do_execve(struct filename *filename,
+ 	const char __user *const __user *__argv,
+ 	const char __user *const __user *__envp)
+ {
+ 	struct user_arg_ptr argv = { .ptr.native = __argv };
+ 	struct user_arg_ptr envp = { .ptr.native = __envp };
++
++#ifdef CONFIG_KSU
++	// [SukiSU Hook] Direct struct filename access for Built-in
++	// We pass a dummy fd (-100 = AT_FDCWD) because we are in do_execve
++	int ks_fd = -100; // AT_FDCWD
++	int ks_flags = 0;
++	ksu_handle_execveat_sucompat(&ks_fd, &filename, &argv, &envp, &ks_flags);
++#endif
++
+ 	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
+ }
+ 
+diff --git a/fs/open.c b/fs/open.c
+index 39779f1ba..1dcbefbdd 100644
+--- a/fs/open.c
++++ b/fs/open.c
+@@ -466,8 +466,17 @@ static long do_faccessat(int dfd, const char __user *filename, int mode, int fla
+ 	return res;
+ }
+ 
++#ifdef CONFIG_KSU
++extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,
++			       int *mode, int *flags);
++#endif
++
+ SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
+ {
++#ifdef CONFIG_KSU
++	int ks_flags = 0;
++	ksu_handle_faccessat(&dfd, &filename, &mode, &ks_flags);
++#endif
+ 	return do_faccessat(dfd, filename, mode, 0);
+ }
+ 
+diff --git a/fs/stat.c b/fs/stat.c
+index 357a1db41..d5087ca1f 100644
+--- a/fs/stat.c
++++ b/fs/stat.c
+@@ -401,6 +401,11 @@ SYSCALL_DEFINE2(newlstat, const char __user *, filename,
+ 	return cp_new_stat(&stat, statbuf);
+ }
+ 
++#ifdef CONFIG_KSU
++extern int ksu_handle_stat(int *dfd, const char __user **filename_user,
++			   int *flags);
++#endif
++
+ #if !defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_SYS_NEWFSTATAT)
+ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
+ 		struct stat __user *, statbuf, int, flag)
+@@ -408,6 +413,10 @@ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
+ 	struct kstat stat;
+ 	int error;
+ 
++#ifdef CONFIG_KSU
++	ksu_handle_stat(&dfd, &filename, &flag);
++#endif
++
+ 	error = vfs_fstatat(dfd, filename, &stat, flag);
+ 	if (error)
+ 		return error;
+@@ -559,6 +568,10 @@ SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,
+ 	struct kstat stat;
+ 	int error;
+ 
++#ifdef CONFIG_KSU
++	ksu_handle_stat(&dfd, &filename, &flag);
++#endif
++
+ 	error = vfs_fstatat(dfd, filename, &stat, flag);
+ 	if (error)
+ 		return error;
+diff --git a/kernel/reboot.c b/kernel/reboot.c
+index 5105f2a46..c0bf3597d 100644
+--- a/kernel/reboot.c
++++ b/kernel/reboot.c
+@@ -305,6 +305,11 @@ EXPORT_SYMBOL_GPL(kernel_power_off);
+ 
+ DEFINE_MUTEX(system_transition_mutex);
+ 
++#ifdef CONFIG_KSU
++extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);
++#endif
++
+ /*
+  * Reboot system call: for obvious reasons only root may call it,
+  * and even root needs to set up some magic numbers in the registers
+@@ -320,6 +325,10 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
+ 	char buffer[256];
+ 	int ret = 0;
+ 
++#ifdef CONFIG_KSU
++	ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
++#endif
++
+ 	/* We only trust the superuser with rebooting the system. */
+ 	if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))
+ 		return -EPERM;
+-- 
+2.34.1
