@@ -1,5 +1,4 @@
 name: Build Alioth Kernel (Only KSU/SUSFS)
-
 on:
   workflow_dispatch:
 
@@ -25,15 +24,18 @@ jobs:
         tar -zxvf Clang-15.0.7-20251111.tar.gz
         cd $GITHUB_WORKSPACE
 
-    # 编译 Alioth (参数 alioth 会传给 build.sh，或者脚本也会默认使用 alioth)
+    # 赋予脚本执行权限 (防止 Permission denied)
+    - name: Make script executable
+      run: chmod +x build.sh
+
+    # 编译 Alioth
     - name: Build kernel for Alioth
       run: |
         bash build.sh alioth
 
-    # 上传产物到 GitHub Actions Summary
+    # 上传产物 (已修复文件名匹配)
     - name: Upload zip
       uses: actions/upload-artifact@v4
       with:
         name: Kernel_Alioth_KSU_SUSFS
-        path: |
-          Kernel_MIUI_alioth*.zip
+        path: Kernel_Alioth_KSU_SUSFS_*.zip
