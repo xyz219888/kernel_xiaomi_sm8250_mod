@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # ==============================================================================
-#  Xiaomi sm8250 Kernel Build Script (SukiSU Built-in + SUSFS Final v3)
-#  Status: Logic Fixed + Flags Verified + SELinux Conflicts Resolved
+#  Xiaomi sm8250 Kernel Build Script (SukiSU Built-in + SUSFS Final v4)
+#  Status: Logic Fixed + Flags Verified + SELinux State API Patched
 # ==============================================================================
 
 # 遇到错误立即停止
@@ -41,7 +41,7 @@ MAKE_ARGS="ARCH=arm64 SUBARCH=arm64 O=out \
     CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
     CLANG_TRIPLE=aarch64-linux-gnu-"
 
-echo -e "${GREEN}=== 🚀 开始最终完美版编译流程 (v3) ===${NC}"
+echo -e "${GREEN}=== 🚀 开始最终完美版编译流程 (v4) ===${NC}"
 
 # ==================== [Step 1: 环境清理] ====================
 echo "🧹 [1/6] 深度清理环境..."
@@ -71,7 +71,7 @@ patch -p1 -F 3 < susfs.patch >/dev/null 2>&1 || { echo -e "${RED}❌ SUSFS 补�
 echo -e "${GREEN}✅ 补丁应用成功${NC}"
 
 # ==================== [Step 3: 源码级适配 (逻辑 & 冲突修复)] ====================
-echo "🔧 [3/6] 执行源码级适配 (修复逻辑炸弹 & SELinux冲突)..."
+echo "🔧 [3/6] 执行源码级适配 (修复逻辑炸弹 & SELinux API)..."
 
 # --- Fix 1: 修复 sucompat.c 缺失接口 (使用正确的处理逻辑) ---
 cat >> drivers/kernelsu/sucompat.c <<'EOF'
@@ -99,17 +99,26 @@ bool ksu_vfs_read_hook __read_mostly = true;
 EXPORT_SYMBOL(ksu_vfs_read_hook);
 EOF
 
-# --- Fix 3: 修复 SELinux 头文件冲突 (关键修复) ---
-# 1. 显式声明 selinux_enforcing 变量 (解决 undeclared identifier)
-# 在文件顶部插入声明
+# --- Fix 3: 修复 SELinux 头文件冲突 (解决 undeclared identifier) ---
+# 显式声明 selinux_enforcing
 sed -i '1i\extern int selinux_enforcing;' drivers/kernelsu/selinux/selinux_defs.h
 
-# 2. 解决 current_sid 重定义冲突
-# 原理：我们之前添加了头文件路径，内核自带的 objsec.h 已经被包含了。
-# 所以我们把 KSU 自己定义的 current_sid 改名废弃掉，让 KSU 代码直接去用内核自带的。
+# 解决 current_sid 重定义冲突
 sed -i 's/static inline u32 current_sid(void)/static inline u32 __ksu_ignored_current_sid(void)/' drivers/kernelsu/selinux/selinux_defs.h
 
-echo -e "${GREEN}✅ 源码适配完成 (逻辑 & 冲突已修复)${NC}"
+# --- Fix 4: 修复 rules.c 适配新版 SELinux API (关键修复) ---
+# 1. 声明 selinux_state 结构体变量
+sed -i '1i\extern struct selinux_state selinux_state;' drivers/kernelsu/selinux/rules.c
+
+# 2. 修复 policydb 引用 (从全局变量改为结构体成员)
+# 将 db = &policydb; 替换为 db = &selinux_state.ss->policydb;
+sed -i 's/&policydb/&selinux_state.ss->policydb/g' drivers/kernelsu/selinux/rules.c
+
+# 3. 修复函数调用参数不足
+# 将 selinux_status_update_policyload(0); 替换为 selinux_status_update_policyload(&selinux_state, 0);
+sed -i 's/selinux_status_update_policyload(0)/selinux_status_update_policyload(\&selinux_state, 0)/g' drivers/kernelsu/selinux/rules.c
+
+echo -e "${GREEN}✅ 源码适配完成 (逻辑 & SELinux API 已修正)${NC}"
 
 # ==================== [Step 4: 重建构建系统 (全参数覆盖)] ====================
 echo "🔥 [4/6] 重建驱动构建规则 (C99兼容 & 路径补全)..."
