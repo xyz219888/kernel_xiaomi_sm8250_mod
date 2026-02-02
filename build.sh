@@ -102,8 +102,8 @@ EOF
 
 echo -e "${GREEN}✅ 源码适配完成 (功能无损)${NC}"
 
-# ==================== [Step 4: 重建构建系统] ====================
-echo "🔥 [4/6] 重建驱动构建规则..."
+# ==================== [Step 4: 重建构建系统 (修复版)] ====================
+echo "🔥 [4/6] 重建驱动构建规则 (已补全版本号与警告屏蔽)..."
 
 # 1. 移除 Kbuild (防止干扰)
 rm -f drivers/kernelsu/Kbuild
@@ -113,10 +113,21 @@ sed -i '/kernelsu/d' drivers/Makefile
 echo "obj-y += kernelsu/" >> drivers/Makefile
 
 # 3. 生成完美的 drivers/kernelsu/Makefile
+# ⚠️ 关键修复：手动补全 KSU_VERSION 定义和编译器警告屏蔽参数
 cat > drivers/kernelsu/Makefile <<'EOF'
-# 强制开启 SUSFS 宏
+# --- 关键定义开始 ---
+# 1. 定义版本号 (模拟最新版，防止 undeclared identifier 'KSU_VERSION' 报错)
+ccflags-y += -DKSU_VERSION=11999
+ccflags-y += -DKSU_VERSION_FULL=\"v1.0.0-SUKISU-Custom\"
+
+# 2. 压制严格警告 (修复 function declaration without a prototype 报错)
+# 内核开启了 -Werror，所以必须显式忽略这些非致命警告
+ccflags-y += -Wno-implicit-function-declaration -Wno-strict-prototypes -Wno-int-to-pointer-cast -Wno-old-style-declaration -Wno-unused-function -Wno-unused-variable
+
+# 3. SUSFS 定义
 ccflags-y += -I$(src)/include
 ccflags-y += -DCONFIG_KSU_SUSFS -DCONFIG_KSU_SUSFS_SUS_PATH -DCONFIG_KSU_SUSFS_SUS_MOUNT
+# --- 关键定义结束 ---
 
 # 核心对象
 obj-y += ksu_core.o
@@ -135,7 +146,7 @@ obj-$(CONFIG_KSU_MANUAL_SU) += manual_su.o
 obj-$(CONFIG_KPM) += kpm/
 EOF
 
-echo -e "${GREEN}✅ 构建系统已锁定${NC}"
+echo -e "${GREEN}✅ 构建系统已锁定 (版本号定义已注入)${NC}"
 
 # ==================== [Step 5: 配置与编译] ====================
 echo "⚙️ [5/6] 生成配置并编译..."
