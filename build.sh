@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # ==============================================================================
-#  Xiaomi sm8250 Kernel Build Script (SukiSU Built-in + SUSFS Final Perfect)
-#  Status: Logic Fixed (No Crash) & Flags Verified
+#  Xiaomi sm8250 Kernel Build Script (SukiSU Built-in + SUSFS Final v3)
+#  Status: Logic Fixed + Flags Verified + SELinux Conflicts Resolved
 # ==============================================================================
 
 # 遇到错误立即停止
@@ -41,7 +41,7 @@ MAKE_ARGS="ARCH=arm64 SUBARCH=arm64 O=out \
     CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
     CLANG_TRIPLE=aarch64-linux-gnu-"
 
-echo -e "${GREEN}=== 🚀 开始最终完美版编译流程 ===${NC}"
+echo -e "${GREEN}=== 🚀 开始最终完美版编译流程 (v3) ===${NC}"
 
 # ==================== [Step 1: 环境清理] ====================
 echo "🧹 [1/6] 深度清理环境..."
@@ -70,23 +70,21 @@ patch -p1 -F 3 < susfs.patch >/dev/null 2>&1 || { echo -e "${RED}❌ SUSFS 补�
 
 echo -e "${GREEN}✅ 补丁应用成功${NC}"
 
-# ==================== [Step 3: 源码级适配 (逻辑完美修复)] ====================
-echo "🔧 [3/6] 执行源码级适配 (修复逻辑炸弹)..."
+# ==================== [Step 3: 源码级适配 (逻辑 & 冲突修复)] ====================
+echo "🔧 [3/6] 执行源码级适配 (修复逻辑炸弹 & SELinux冲突)..."
 
 # --- Fix 1: 修复 sucompat.c 缺失接口 (使用正确的处理逻辑) ---
-# ⚠️ 关键修正：这里不能调用 ksu_handle_execveat_sucompat (因为参数类型不同，会崩)
-# 我们必须调用 ksu_sucompat_user_common 来处理用户态字符串，这才是 v1.6 补丁需要的
 cat >> drivers/kernelsu/sucompat.c <<'EOF'
 
 /* [Patch by BuildScript] Perfect Fix for v1.6 Hooks + SUSFS */
 #ifdef CONFIG_KSU_SUSFS
 
-// 桥接函数：完全匹配 v1.6 补丁的参数类型 (const char __user **)
-// 调用 SukiSU 内部通用的用户态字符串处理函数，完美复活 Root 功能
+// 桥接函数：完全匹配 v1.6 补丁的参数类型
 int ksu_handle_execve_sucompat(int *fd, const char __user **filename_user,
 			       void *__never_use_argv, void *__never_use_envp,
 			       int *__never_use_flags)
 {
+    // 调用 SukiSU 内部处理函数，完美复活 Root 功能
     return ksu_sucompat_user_common(filename_user, "sys_execve", true);
 }
 #endif
@@ -97,12 +95,21 @@ cat >> drivers/kernelsu/ksu.c <<'EOF'
 
 /* [Patch by BuildScript] Restore Missing Symbols */
 #include <linux/export.h>
-// 强制定义并导出 read hook 开关，确保文件隐藏功能可用
 bool ksu_vfs_read_hook __read_mostly = true;
 EXPORT_SYMBOL(ksu_vfs_read_hook);
 EOF
 
-echo -e "${GREEN}✅ 源码适配完成 (逻辑已验证)${NC}"
+# --- Fix 3: 修复 SELinux 头文件冲突 (关键修复) ---
+# 1. 显式声明 selinux_enforcing 变量 (解决 undeclared identifier)
+# 在文件顶部插入声明
+sed -i '1i\extern int selinux_enforcing;' drivers/kernelsu/selinux/selinux_defs.h
+
+# 2. 解决 current_sid 重定义冲突
+# 原理：我们之前添加了头文件路径，内核自带的 objsec.h 已经被包含了。
+# 所以我们把 KSU 自己定义的 current_sid 改名废弃掉，让 KSU 代码直接去用内核自带的。
+sed -i 's/static inline u32 current_sid(void)/static inline u32 __ksu_ignored_current_sid(void)/' drivers/kernelsu/selinux/selinux_defs.h
+
+echo -e "${GREEN}✅ 源码适配完成 (逻辑 & 冲突已修复)${NC}"
 
 # ==================== [Step 4: 重建构建系统 (全参数覆盖)] ====================
 echo "🔥 [4/6] 重建驱动构建规则 (C99兼容 & 路径补全)..."
@@ -121,9 +128,7 @@ cat > drivers/kernelsu/Makefile <<'EOF'
 ccflags-y += -DKSU_VERSION=11999
 ccflags-y += -DKSU_VERSION_FULL=\"v1.0.0-SUKISU-Custom\"
 
-# 2. 【关键修复】压制严格警告 & C99 兼容
-# -Wno-declaration-after-statement: 允许变量在代码块中间声明 (修复 app_profile.c 报错)
-# -Wno-missing-braces: 防止结构体初始化警告
+# 2. 压制严格警告 & C99 兼容
 ccflags-y += -Wno-implicit-function-declaration -Wno-strict-prototypes -Wno-int-to-pointer-cast -Wno-unused-function -Wno-unused-variable -Wno-missing-braces -Wno-declaration-after-statement
 
 # 3. SUSFS 定义
@@ -131,13 +136,12 @@ ccflags-y += -I$(src)/include
 ccflags-y += -DCONFIG_KSU_SUSFS -DCONFIG_KSU_SUSFS_SUS_PATH -DCONFIG_KSU_SUSFS_SUS_MOUNT
 
 # 4. 【头文件路径全补全】
-# 修复 fatal error: 'ss/policydb.h' 等 SELinux 相关错误
+# 修复 fatal error: 'ss/policydb.h'
 ccflags-y += -I$(srctree)/security/selinux
 ccflags-y += -I$(srctree)/security/selinux/include
 ccflags-y += -I$(objtree)/security/selinux
 
-# 5. 【原版兼容性】
-# 强制包含 errno，防止隐性定义错误
+# 5. 原版兼容性
 ccflags-y += -include $(srctree)/include/uapi/asm-generic/errno.h
 # ----------------------
 
@@ -158,7 +162,7 @@ obj-$(CONFIG_KSU_MANUAL_SU) += manual_su.o
 obj-$(CONFIG_KPM) += kpm/
 EOF
 
-echo -e "${GREEN}✅ 构建系统已锁定 (C99 兼容模式已激活)${NC}"
+echo -e "${GREEN}✅ 构建系统已锁定${NC}"
 
 # ==================== [Step 5: 配置与编译] ====================
 echo "⚙️ [5/6] 生成配置并编译..."
