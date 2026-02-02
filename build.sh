@@ -4,14 +4,14 @@ set -e
 # ==================== [配置区域] ====================
 TOOLCHAIN_PATH=$HOME/zyc-clang/bin
 TARGET_DEVICE="alioth"
-# 补丁路径：建议放在根目录
-PATCH_FILE="sukisu_v1.6_reconstructed.patch" 
+# 补丁文件名 (必须与第一步创建的文件名一致)
+PATCH_FILE="manual_hook_perfect.patch"
 # ====================================================
 
-# 检查环境
+# 0. 检查补丁文件是否存在 (防止空跑)
 if [ ! -f "$PATCH_FILE" ]; then
-    echo "❌ 错误：找不到补丁文件 $PATCH_FILE"
-    echo "请确保已创建 sukisu_v1.6_reconstructed.patch 文件"
+    echo "❌ 错误：找不到补丁文件: $PATCH_FILE"
+    echo "请先在同级目录下创建 manual_hook_perfect.patch 文件"
     exit 1
 fi
 
@@ -32,38 +32,50 @@ MAKE_ARGS="ARCH=arm64 SUBARCH=arm64 O=out \
     CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
     CLANG_TRIPLE=aarch64-linux-gnu-"
 
-echo -e "\033[0;32m=== 🚀 开始编译流程 (MIUI Fix + SukiSU Final) ===\033[0m"
+echo -e "\033[0;32m=== 🚀 开始编译流程 (清理 -> 下载 -> 适配 -> 编译) ===\033[0m"
 
-# ==================== [Step 1: 环境清理] ====================
-echo "🧹 [1/6] 清理环境..."
+# ==================== [Step 1: 优先级最高 - 深度清理] ====================
+echo "🧹 [1/6] 执行深度清理 (去除源码自带的旧版组件)..."
+# 必须先回滚自带的 KSU 修改，防止文件冲突。即使报错也继续，因为可能没打过补丁
 curl -L https://github.com/ApartTUSITU/kernel_xiaomi_sm8250_mod/commit/a05557c.patch | git apply -v >/dev/null 2>&1 || true
+# 强行删除目录 (双重保险)
 rm -rf drivers/kernelsu drivers/susfs fs/susfs out/
 mkdir -p out
+echo "   ✅ 环境已纯净"
 
-# ==================== [Step 2: 下载组件] ====================
-echo "⬇️ [2/6] 下载组件..."
-# 1. 下载 SukiSU
+# ==================== [Step 2: 下载新组件] ====================
+echo "⬇️ [2/6] 下载 SukiSU & SUSFS..."
+# 下载 SukiSU (Built-in 分支)
 curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 
-# 2. 下载 SUSFS 补丁
+# 下载 SUSFS 补丁
 wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch -q
 
-# ==================== [Step 3: 应用补丁 & 适配] ====================
-echo "🔧 [3/6] 应用补丁与适配..."
+# ==================== [Step 3: 应用补丁] ====================
+echo "🔧 [3/6] 应用补丁..."
 
-# 1. 应用内核钩子 (Reconstructed Patch)
+# 1. 应用完美适配版 Manual Hook (内核侧)
+echo "   正在应用: $PATCH_FILE"
 patch -p1 < "$PATCH_FILE"
 
 # 2. 应用 SUSFS 补丁
+echo "   正在应用: susfs.patch"
 patch -p1 < susfs.patch
 
-# 3. SukiSU 代码适配 (修复 SELinux & 编译参数)
-echo "   正在执行 SukiSU 源码适配..."
+# ==================== [Step 4: SukiSU 源码适配] ====================
+echo "💉 [4/6] 执行 SukiSU 源码适配..."
+# 注意：不需要再补空函数，因为 manual_hook_perfect.patch 已经移除了死代码调用
+
+# 1. 重写 Makefile (适配 4.19 内核 & SUSFS)
 rm -f drivers/kernelsu/Kbuild
 cat > drivers/kernelsu/Makefile <<'EOF'
+# 注入版本号
 ccflags-y += -DKSU_VERSION=11999 -DKSU_VERSION_FULL=\"v1.0.0-SUKISU-Custom\"
+# 屏蔽 C99 警告 (防止 mixing declarations and code 报错)
 ccflags-y += -Wno-implicit-function-declaration -Wno-strict-prototypes -Wno-int-to-pointer-cast -Wno-unused-function -Wno-unused-variable -Wno-missing-braces -Wno-declaration-after-statement
+# 开启 SUSFS
 ccflags-y += -I$(src)/include -DCONFIG_KSU_SUSFS -DCONFIG_KSU_SUSFS_SUS_PATH -DCONFIG_KSU_SUSFS_SUS_MOUNT
+# 补全头文件路径 (解决 policydb.h 找不到)
 ccflags-y += -I$(srctree)/security/selinux -I$(srctree)/security/selinux/include -I$(objtree)/security/selinux
 ccflags-y += -include $(srctree)/include/uapi/asm-generic/errno.h
 
@@ -77,16 +89,23 @@ obj-$(CONFIG_KSU_MANUAL_SU) += manual_su.o
 obj-$(CONFIG_KPM) += kpm/
 EOF
 
-# 4. 修复 SELinux API 兼容性
+# 2. 修复 SELinux API 冲突 (解决 undeclared identifier)
+# 声明 selinux_state 结构体
 sed -i '1i\extern struct selinux_state selinux_state;' drivers/kernelsu/selinux/rules.c
+# 替换全局 policydb 为结构体成员
 sed -i 's/&policydb/&selinux_state.ss->policydb/g' drivers/kernelsu/selinux/rules.c
+# 补全函数参数 (解决 too few arguments)
 sed -i 's/selinux_status_update_policyload(0)/selinux_status_update_policyload(\&selinux_state, 0)/g' drivers/kernelsu/selinux/rules.c
+# 声明变量和屏蔽重定义函数 (解决 current_sid 冲突)
 sed -i '1i\extern int selinux_enforcing;' drivers/kernelsu/selinux/selinux_defs.h
 sed -i 's/static inline u32 current_sid(void)/static inline u32 __ksu_ignored_current_sid(void)/' drivers/kernelsu/selinux/selinux_defs.h
 
-# ==================== [Step 4: MIUI DTS 修复] ====================
-echo "📱 [4/6] 执行 MIUI DTS 显示修复..."
+# ==================== [Step 5: MIUI DTS 修复 & 配置生成] ====================
+echo "⚙️ [5/6] 执行 MIUI 深度适配 (DTS & Config)..."
+
+echo "   -> 正在修复 DTS 显示参数..."
 dts_source=arch/arm64/boot/dts/vendor/qcom
+# 备份 DTS (可选)
 cp -a ${dts_source} .dts.bak
 
 # Correct panel dimensions & Fix Display
@@ -139,13 +158,12 @@ sed -i 's/\/\/39 01 00 00 00 00 05 51 07 FF 00 00/39 01 00 00 00 00 05 51 07 FF 
 sed -i 's/\/\/39 01 00 00 01 00 03 51 03 FF/39 01 00 00 01 00 03 51 03 FF/g' ${dts_source}/dsi-panel-j11-38-08-0a-fhd-cmd.dtsi
 sed -i 's/\/\/39 01 00 00 11 00 03 51 03 FF/39 01 00 00 11 00 03 51 03 FF/g' ${dts_source}/dsi-panel-j2-p2-1-38-0c-0a-dsc-cmd.dtsi
 
-# ==================== [Step 5: 配置与编译] ====================
-echo "⚙️ [5/6] 生成配置并编译..."
-
-# 生成基础配置
+# Make Defconfig
+echo "   -> 生成基础 Config..."
 make $MAKE_ARGS ${TARGET_DEVICE}_defconfig
 
-# 强制注入配置 (KSU + SUSFS + MIUI Performance)
+# 注入 KSU & SUSFS 配置 (按你提供的标准)
+echo "   -> 注入 KSU/SUSFS/MIUI 核心配置..."
 scripts/config --file out/.config \
     -e KSU \
     -e KSU_MANUAL_HOOK \
@@ -166,7 +184,10 @@ scripts/config --file out/.config \
     -e KSU_SUSFS_OPEN_REDIRECT \
     -e KSU_SUSFS_SUS_MAP \
     -d KSU_SUSFS_SUS_SU \
-    -e KPM \
+    -e KPM
+
+# 注入 MIUI 优化配置
+scripts/config --file out/.config \
     --set-str STATIC_USERMODEHELPER_PATH /system/bin/micd \
     -e PERF_CRITICAL_RT_TASK \
     -e SF_BINDER \
@@ -182,6 +203,7 @@ scripts/config --file out/.config \
     -e PERF_HUMANTASK \
     -d LTO_CLANG \
     -d LOCALVERSION_AUTO \
+    -e SF_BINDER \
     -e XIAOMI_MIUI \
     -d MI_MEMORY_SYSFS \
     -e TASK_DELAY_ACCT \
@@ -197,42 +219,24 @@ scripts/config --file out/.config \
 # 确保配置生效
 make $MAKE_ARGS olddefconfig
 
-# 开始编译
-echo "🚀 启动多核编译..."
+# ==================== [Step 6: 编译 & 打包] ====================
+echo "🚀 [6/6] 启动多核编译..."
 make $MAKE_ARGS -j$(nproc)
 
-# 检查结果
 if [ -f "out/arch/arm64/boot/Image" ]; then
-    echo -e "${GREEN}✅ 编译成功！Image 已生成。${NC}"
+    echo -e "\033[0;32m✅ 编译成功！Image 已生成。\033[0m"
+    
+    # 打包流程
+    rm -rf anykernel && git clone https://github.com/liyafe1997/AnyKernel3 -b kona --depth=1 anykernel
+    rm -rf anykernel/kernels/ && mkdir -p anykernel/kernels/
+    cp out/arch/arm64/boot/Image anykernel/kernels/
+    find out/arch/arm64/boot/dts -name '*.dtb' -exec cat {} + > anykernel/kernels/dtb
+    
+    cd anykernel
+    zip -r9 "../Kernel_Alioth_KSU_SUSFS_MIUI_$(date +'%Y%m%d').zip" ./* -x .git .gitignore
+    cd ..
+    echo -e "\033[0;32m🎉 刷机包已生成！\033[0m"
 else
-    echo -e "${RED}❌ 编译失败！请检查上方日志。${NC}"
+    echo -e "\033[0;31m❌ 编译失败！请检查上方日志。\033[0m"
     exit 1
 fi
-
-# ==================== [Step 6: 打包] ====================
-echo "📦 [6/6] 正在打包..."
-
-# 生成 DTB (集成修复后的 dtb)
-find out/arch/arm64/boot/dts -name '*.dtb' -exec cat {} + >out/arch/arm64/boot/dtb
-
-# 恢复源码 (可选，保持环境清洁)
-rm -rf ${dts_source}
-mv .dts.bak ${dts_source}
-
-# 准备 AnyKernel3
-rm -rf anykernel
-git clone https://github.com/liyafe1997/AnyKernel3 -b kona --single-branch --depth=1 anykernel
-rm -rf anykernel/kernels/ && mkdir -p anykernel/kernels/
-
-# 复制文件
-cp out/arch/arm64/boot/Image anykernel/kernels/
-cp out/arch/arm64/boot/dtb anykernel/kernels/
-
-# 生成 Zip
-GIT_COMMIT_ID=$(git rev-parse --short=8 HEAD)
-cd anykernel
-ZIP_NAME="Kernel_Alioth_KSU_SUSFS_MIUI_$(date +'%Y%m%d')_${GIT_COMMIT_ID}.zip"
-zip -r9 "$ZIP_NAME" ./* -x .git .gitignore out/ ./*.zip
-mv "$ZIP_NAME" ../
-
-echo -e "${GREEN}🎉 恭喜！刷机包已生成: ${ZIP_NAME}${NC}"
