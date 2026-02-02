@@ -106,8 +106,8 @@ EOF
 
 echo -e "${GREEN}✅ 源码适配完成 (类型安全 verify pass)${NC}"
 
-# ==================== [Step 4: 重建构建系统 (修复报错)] ====================
-echo "🔥 [4/6] 重建驱动构建规则 (已注入版本号与警告屏蔽)..."
+# ==================== [Step 4: 重建构建系统 (修复 Clang 兼容性)] ====================
+echo "🔥 [4/6] 重建驱动构建规则 (移除 GCC 专属参数)..."
 
 # 1. 移除 Kbuild
 rm -f drivers/kernelsu/Kbuild
@@ -119,12 +119,13 @@ echo "obj-y += kernelsu/" >> drivers/Makefile
 # 3. 生成 drivers/kernelsu/Makefile
 cat > drivers/kernelsu/Makefile <<'EOF'
 # --- 关键修复区域 ---
-# 1. 定义版本号 (修复 undeclared identifier 'KSU_VERSION')
+# 1. 定义版本号
 ccflags-y += -DKSU_VERSION=11999
 ccflags-y += -DKSU_VERSION_FULL=\"v1.0.0-SUKISU-Custom\"
 
-# 2. 压制严格警告 (修复 function declaration without a prototype 报错)
-ccflags-y += -Wno-implicit-function-declaration -Wno-strict-prototypes -Wno-int-to-pointer-cast -Wno-old-style-declaration -Wno-unused-function -Wno-unused-variable
+# 2. 压制严格警告 (Clang 兼容版)
+# 移除了 -Wno-old-style-declaration (这是 GCC 专属参数，Clang 会报错)
+ccflags-y += -Wno-implicit-function-declaration -Wno-strict-prototypes -Wno-int-to-pointer-cast -Wno-unused-function -Wno-unused-variable
 
 # 3. SUSFS 定义
 ccflags-y += -I$(src)/include
@@ -148,7 +149,7 @@ obj-$(CONFIG_KSU_MANUAL_SU) += manual_su.o
 obj-$(CONFIG_KPM) += kpm/
 EOF
 
-echo -e "${GREEN}✅ 构建系统已锁定${NC}"
+echo -e "${GREEN}✅ 构建系统已锁定 (Clang 兼容性修复)${NC}"
 
 # ==================== [Step 5: 配置与编译] ====================
 echo "⚙️ [5/6] 生成配置并编译..."
