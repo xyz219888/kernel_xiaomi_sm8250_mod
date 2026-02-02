@@ -133,5 +133,3 @@ index 5105f2a46..c0bf3597d 100644
  	/* We only trust the superuser with rebooting the system. */
  	if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))
  		return -EPERM;
--- 
-2.34.1
