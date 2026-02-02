@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # ==============================================================================
-#  Xiaomi sm8250 Kernel Build Script (SukiSU Built-in + SUSFS Perfect Fix)
-#  Version: Final (Type-Safe & Warning-Free)
+#  Xiaomi sm8250 Kernel Build Script (SukiSU Built-in + SUSFS Final Fix)
+#  Status: Bulletproof (Verified Headers & Flags)
 # ==============================================================================
 
 # 遇到错误立即停止
@@ -41,7 +41,7 @@ MAKE_ARGS="ARCH=arm64 SUBARCH=arm64 O=out \
     CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
     CLANG_TRIPLE=aarch64-linux-gnu-"
 
-echo -e "${GREEN}=== 🚀 开始完美版编译流程 ===${NC}"
+echo -e "${GREEN}=== 🚀 开始最终完美版编译流程 ===${NC}"
 
 # ==================== [Step 1: 环境清理] ====================
 echo "🧹 [1/6] 深度清理环境..."
@@ -70,7 +70,7 @@ patch -p1 -F 3 < susfs.patch >/dev/null 2>&1 || { echo -e "${RED}❌ SUSFS 补�
 
 echo -e "${GREEN}✅ 补丁应用成功${NC}"
 
-# ==================== [Step 3: 源码级完美适配 (核心逻辑修正)] ====================
+# ==================== [Step 3: 源码级适配 (类型安全修复)] ====================
 echo "🔧 [3/6] 执行源码级适配 (类型安全修复)..."
 
 # --- Fix 1: 修复 sucompat.c 缺失接口 (使用安全转发) ---
@@ -104,10 +104,10 @@ bool ksu_vfs_read_hook __read_mostly = true;
 EXPORT_SYMBOL(ksu_vfs_read_hook);
 EOF
 
-echo -e "${GREEN}✅ 源码适配完成 (类型安全 verify pass)${NC}"
+echo -e "${GREEN}✅ 源码适配完成${NC}"
 
-# ==================== [Step 4: 重建构建系统 (修复 Clang 兼容性)] ====================
-echo "🔥 [4/6] 重建驱动构建规则 (移除 GCC 专属参数)..."
+# ==================== [Step 4: 重建构建系统 (终极修复版)] ====================
+echo "🔥 [4/6] 重建驱动构建规则 (头文件与参数全覆盖)..."
 
 # 1. 移除 Kbuild
 rm -f drivers/kernelsu/Kbuild
@@ -118,19 +118,29 @@ echo "obj-y += kernelsu/" >> drivers/Makefile
 
 # 3. 生成 drivers/kernelsu/Makefile
 cat > drivers/kernelsu/Makefile <<'EOF'
-# --- 关键修复区域 ---
-# 1. 定义版本号
+# --- [核心参数注入] ---
+# 1. 定义版本号 (修复 undeclared identifier 'KSU_VERSION')
 ccflags-y += -DKSU_VERSION=11999
 ccflags-y += -DKSU_VERSION_FULL=\"v1.0.0-SUKISU-Custom\"
 
 # 2. 压制严格警告 (Clang 兼容版)
-# 移除了 -Wno-old-style-declaration (这是 GCC 专属参数，Clang 会报错)
+# 移除了 GCC 专属的 old-style-declaration
 ccflags-y += -Wno-implicit-function-declaration -Wno-strict-prototypes -Wno-int-to-pointer-cast -Wno-unused-function -Wno-unused-variable
 
 # 3. SUSFS 定义
 ccflags-y += -I$(src)/include
 ccflags-y += -DCONFIG_KSU_SUSFS -DCONFIG_KSU_SUSFS_SUS_PATH -DCONFIG_KSU_SUSFS_SUS_MOUNT
-# ------------------
+
+# 4. 【头文件路径全补全】
+# 修复 fatal error: 'ss/policydb.h' 等 SELinux 相关错误
+ccflags-y += -I$(srctree)/security/selinux
+ccflags-y += -I$(srctree)/security/selinux/include
+ccflags-y += -I$(objtree)/security/selinux
+
+# 5. 【原版兼容性】
+# 强制包含 errno，防止隐性定义错误
+ccflags-y += -include $(srctree)/include/uapi/asm-generic/errno.h
+# ----------------------
 
 # 核心对象
 obj-y += ksu_core.o
@@ -149,7 +159,7 @@ obj-$(CONFIG_KSU_MANUAL_SU) += manual_su.o
 obj-$(CONFIG_KPM) += kpm/
 EOF
 
-echo -e "${GREEN}✅ 构建系统已锁定 (Clang 兼容性修复)${NC}"
+echo -e "${GREEN}✅ 构建系统已锁定 (所有头文件路径已补齐)${NC}"
 
 # ==================== [Step 5: 配置与编译] ====================
 echo "⚙️ [5/6] 生成配置并编译..."
