@@ -1,60 +1,57 @@
-From 98345832aea56695842622081cb0d2ff7963157d Mon Sep 17 00:00:00 2001
 From: SukiSU-Refactored <admin@sukisu.io>
-Date: Tue, 03 Feb 2026 03:00:00 +0800
-Subject: [PATCH] SukiSU Manual Hooks (Refactored for Built-in)
+Subject: [PATCH] SukiSU Built-in Manual Hooks (Perfect Logic)
 
-Adapts to SukiSU v0.7+ / Built-in architecture:
-- Hooks do_execve instead of sys_execve for direct struct filename access.
-- Drops deprecated vfs_read_hook (handled by SUSFS).
-- Drops deprecated input_hook.
-- Keeps stat/faccessat/reboot hooks.
+Adapts to SukiSU Built-in architecture:
+- Hooks do_execveat_common for direct struct filename access (Best Practice).
+- Hooks vfs_fstatat and do_faccessat for hiding detection.
+- Drops deprecated read/input/reboot hooks to prevent build errors.
 
 ---
- fs/exec.c       | 15 +++++++++++++++
- fs/open.c       |  9 +++++++++
- fs/stat.c       | 13 +++++++++++++
- kernel/reboot.c |  9 +++++++++
- 4 files changed, 46 insertions(+)
+ fs/exec.c | 16 ++++++++++++++++
+ fs/open.c | 11 +++++++++++
+ fs/stat.c | 12 ++++++++++++
+ 3 files changed, 39 insertions(+)
 
 diff --git a/fs/exec.c b/fs/exec.c
-index b1b9db56a..e90e89f29 100644
+index b1b9db5..e90e89f 100644
 --- a/fs/exec.c
 +++ b/fs/exec.c
-@@ -1888,11 +1888,26 @@ static int __do_execve_file(int fd, struct filename *filename,
+@@ -1888,11 +1888,27 @@ static int __do_execve_file(int fd, struct filename *filename,
  	return retval;
  }
  
++/* [SukiSU] Import External Function */
 +#ifdef CONFIG_KSU
 +extern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr,
 +					void *argv, void *envp, int *flags);
 +#endif
 +
- int do_execve(struct filename *filename,
- 	const char __user *const __user *__argv,
- 	const char __user *const __user *__envp)
+ int do_execveat_common(int fd, struct filename *filename,
+ 		       struct user_arg_ptr argv,
+ 		       struct user_arg_ptr envp,
+ 		       int flags)
  {
- 	struct user_arg_ptr argv = { .ptr.native = __argv };
- 	struct user_arg_ptr envp = { .ptr.native = __envp };
-+
++    /* [SukiSU] Hook execve at kernel level
++     * This allows SukiSU to redirect /system/bin/su to ksud
++     * using the struct filename directly.
++     */
 +#ifdef CONFIG_KSU
-+	// [SukiSU Hook] Direct struct filename access for Built-in
-+	// We pass a dummy fd (-100 = AT_FDCWD) because we are in do_execve
-+	int ks_fd = -100; // AT_FDCWD
-+	int ks_flags = 0;
-+	ksu_handle_execveat_sucompat(&ks_fd, &filename, &argv, &envp, &ks_flags);
++	// We pass the address of 'filename' so SukiSU can modify it if needed
++	ksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);
 +#endif
 +
- 	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
+ 	return __do_execve_file(fd, filename, argv, envp, flags, NULL);
  }
  
 diff --git a/fs/open.c b/fs/open.c
-index 39779f1ba..1dcbefbdd 100644
+index 39779f1..1dcbefb 100644
 --- a/fs/open.c
 +++ b/fs/open.c
-@@ -466,8 +466,17 @@ static long do_faccessat(int dfd, const char __user *filename, int mode, int fla
+@@ -466,8 +466,19 @@ static long do_faccessat(int dfd, const char __user *filename, int mode, int fla
  	return res;
  }
  
++/* [SukiSU] Import External Function */
 +#ifdef CONFIG_KSU
 +extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,
 +			       int *mode, int *flags);
@@ -62,6 +59,7 @@ index 39779f1ba..1dcbefbdd 100644
 +
  SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
  {
++    /* [SukiSU] Hook faccessat to hide su existence */
 +#ifdef CONFIG_KSU
 +	int ks_flags = 0;
 +	ksu_handle_faccessat(&dfd, &filename, &mode, &ks_flags);
@@ -70,13 +68,14 @@ index 39779f1ba..1dcbefbdd 100644
  }
  
 diff --git a/fs/stat.c b/fs/stat.c
-index 357a1db41..d5087ca1f 100644
+index 357a1db..d5087ca 100644
 --- a/fs/stat.c
 +++ b/fs/stat.c
-@@ -401,6 +401,11 @@ SYSCALL_DEFINE2(newlstat, const char __user *, filename,
+@@ -401,6 +401,12 @@ SYSCALL_DEFINE2(newlstat, const char __user *, filename,
  	return cp_new_stat(&stat, statbuf);
  }
  
++/* [SukiSU] Import External Function */
 +#ifdef CONFIG_KSU
 +extern int ksu_handle_stat(int *dfd, const char __user **filename_user,
 +			   int *flags);
@@ -85,10 +84,11 @@ index 357a1db41..d5087ca1f 100644
  #if !defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_SYS_NEWFSTATAT)
  SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
  		struct stat __user *, statbuf, int, flag)
-@@ -408,6 +413,10 @@ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
+@@ -408,6 +414,12 @@ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
  	struct kstat stat;
  	int error;
  
++    /* [SukiSU] Hook newfstatat to hide su existence */
 +#ifdef CONFIG_KSU
 +	ksu_handle_stat(&dfd, &filename, &flag);
 +#endif
@@ -96,40 +96,5 @@ index 357a1db41..d5087ca1f 100644
  	error = vfs_fstatat(dfd, filename, &stat, flag);
  	if (error)
  		return error;
-@@ -559,6 +568,10 @@ SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,
- 	struct kstat stat;
- 	int error;
- 
-+#ifdef CONFIG_KSU
-+	ksu_handle_stat(&dfd, &filename, &flag);
-+#endif
-+
- 	error = vfs_fstatat(dfd, filename, &stat, flag);
- 	if (error)
- 		return error;
-diff --git a/kernel/reboot.c b/kernel/reboot.c
-index 5105f2a46..c0bf3597d 100644
---- a/kernel/reboot.c
-+++ b/kernel/reboot.c
-@@ -305,6 +305,11 @@ EXPORT_SYMBOL_GPL(kernel_power_off);
- 
- DEFINE_MUTEX(system_transition_mutex);
- 
-+#ifdef CONFIG_KSU
-+extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);
-+#endif
-+
- /*
-  * Reboot system call: for obvious reasons only root may call it,
-  * and even root needs to set up some magic numbers in the registers
-@@ -320,6 +325,10 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
- 	char buffer[256];
- 	int ret = 0;
- 
-+#ifdef CONFIG_KSU
-+	ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
-+#endif
-+
- 	/* We only trust the superuser with rebooting the system. */
- 	if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))
- 		return -EPERM;
+-- 
+2.34.1
