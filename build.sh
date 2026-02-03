@@ -35,6 +35,7 @@ mkdir -p out
 echo "⬇️ [2/6] 下载 SukiSU & SUSFS..."
 curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch -q
+
 # ==================== [Step 3: 暴力注入 Manual Hook] ====================
 echo "🔧 [3/6] 执行代码暴力注入..."
 
@@ -49,7 +50,6 @@ ksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);\
 # --- 2. 修改 fs/open.c ---
 echo "   -> 正在修改 fs/open.c..."
 # [🚨 修复] 你的内核源码中 faccessat 的参数名为 fd，而非 dfd
-# 这里强制使用 &fd 进行注入，解决 undeclared identifier 'dfd' 报错
 sed -i '/return do_faccessat/i \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\
@@ -68,7 +68,6 @@ ksu_handle_stat(&dfd, &filename, &flag);\
 echo "   ✅ Hook 代码注入完成！"
 
 echo "   -> 应用 SUSFS 补丁..."
-# 保持 fuzz=3 以确保 SUSFS 补丁能打上
 patch -p1 --ignore-whitespace --fuzz=3 < susfs.patch
 
 # ==================== [Step 4: SukiSU 源码适配] ====================
@@ -76,10 +75,12 @@ echo "💉 [4/6] 执行 SukiSU 源码适配..."
 
 # 1. 生成 Makefile
 rm -f drivers/kernelsu/Kbuild
+# [优化] 添加 -DKSU_COMPAT_HAS_CURRENT_SID 防止 4.19 内核重复定义 current_sid
 cat > drivers/kernelsu/Makefile <<'EOF'
 ccflags-y += -DKSU_VERSION=11999 -DKSU_VERSION_FULL=\"v1.0.0-SUKISU-Custom\"
 ccflags-y += -Wno-implicit-function-declaration -Wno-strict-prototypes -Wno-int-to-pointer-cast -Wno-unused-function -Wno-unused-variable -Wno-missing-braces -Wno-declaration-after-statement
 ccflags-y += -I$(src)/include -DCONFIG_KSU_SUSFS -DCONFIG_KSU_SUSFS_SUS_PATH -DCONFIG_KSU_SUSFS_SUS_MOUNT
+ccflags-y += -DKSU_COMPAT_HAS_CURRENT_SID
 ccflags-y += -I$(srctree)/security/selinux -I$(srctree)/security/selinux/include -I$(objtree)/security/selinux
 ccflags-y += -include $(srctree)/include/uapi/asm-generic/errno.h
 obj-y += ksu_core.o
@@ -92,9 +93,10 @@ obj-$(CONFIG_KSU_MANUAL_SU) += manual_su.o
 obj-$(CONFIG_KPM) += kpm/
 EOF
 
-# [🚨 修复] 删除了所有针对 selinux/rules.c 的 sed 修改
-# 之前的 sed 命令导致了 'policydbselinux_state' 这种拼接错误。
-# 对于 4.19 内核，通常不需要这些修改，直接用原生 SukiSU 代码即可。
+# [🚨 关键] 删除了所有针对 selinux/rules.c 的 sed 修改
+# 既然 SukiSU 源码已经自带了兼容 4.19 的逻辑，我们就不要去破坏它。
+echo "   -> 已跳过错误的 SELinux 修改，使用 SukiSU 原生兼容逻辑。"
+
 # ==================== [Step 5: MIUI DTS & Config] ====================
 echo "⚙️ [5/6] 执行 MIUI 深度适配..."
 
