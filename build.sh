@@ -39,13 +39,13 @@ curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kern
 wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch -q
 
 
-# ==================== [Step 3: 补丁与 Hook 注入 (修复 git 报错版)] ====================
-echo "🔧 [3/6] 执行补丁应用与代码注入..."
+# ==================== [Step 3: 补丁与 Hook 注入 (修复编译报错版)] ====================
+echo "🔧 [3/6] 执行补丁应用与代码注入 (Fix read_write error)..."
 
-# [重点] 重置内核原生文件 (只重置内核自带的文件，不要重置 kernelsu 的文件)
+# [重点] 重置文件
 git checkout fs/exec.c fs/open.c fs/stat.c fs/read_write.c drivers/input/input.c
 
-# 1. 先应用 SUSFS 补丁 (防止后续 Hook 导致补丁偏移失败)
+# 1. 应用 SUSFS 补丁
 echo "   -> 正在应用 SUSFS 补丁..."
 if [ -f "susfs.patch" ]; then
     patch -p1 --ignore-whitespace --fuzz=3 < susfs.patch || { echo "❌ SUSFS 补丁应用失败！"; exit 1; }
@@ -55,68 +55,67 @@ fi
 
 echo "   -> 正在执行 SukiSU Manual Hook..."
 
-# --- 1. fs/exec.c (模块加载核心) ---
-# 声明
+# --- 1. fs/exec.c ---
 sed -i '1i\
 #ifdef CONFIG_KSU\
 extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\
 #endif' fs/exec.c
-# 注入 (在 do_execveat_common 或 __do_execve_file 返回前)
+
 sed -i '/return __do_execve_file/i \
 #ifdef CONFIG_KSU\
 ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\
 #endif' fs/exec.c
 
-# --- 2. fs/open.c (隐藏 su) ---
-# 声明
+# --- 2. fs/open.c ---
 sed -i '1i\
 #ifdef CONFIG_KSU\
 extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\
 #endif' fs/open.c
-# 注入 faccessat (有 dfd)
+
 sed -i '/return do_faccessat(dfd,/i \
 #ifdef CONFIG_KSU\
 { int ks_flags = 0; ksu_handle_faccessat(&dfd, &filename, &mode, &ks_flags); }\
 #endif' fs/open.c
-# 注入 access (无 dfd，需手动定义 AT_FDCWD)
+
 sed -i '/return do_faccessat(AT_FDCWD,/i \
 #ifdef CONFIG_KSU\
 { int dfd = AT_FDCWD; int ks_flags = 0; ksu_handle_faccessat(&dfd, &filename, &mode, &ks_flags); }\
 #endif' fs/open.c
 
-# --- 3. fs/stat.c (SUSFS 隐藏) ---
-# 声明
+# --- 3. fs/stat.c ---
 sed -i '1i\
 #ifdef CONFIG_KSU\
 extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\
 extern void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr);\
 #endif' fs/stat.c
-# 注入 vfs_fstatat
+
 sed -i '/error = vfs_fstatat/i \
 #ifdef CONFIG_KSU\
 ksu_handle_stat(&dfd, &filename, &flag);\
 #endif' fs/stat.c
-# 注入 vfs_fstat (通常在 vfs_getattr 之后)
+
 sed -i '/return error;/i \
 #ifdef CONFIG_KSU\
 if (!error) ksu_handle_vfs_fstat(fd, &stat->size);\
 #endif' fs/stat.c
 
-# --- 4. fs/read_write.c (修复版：精准定位 syscall) ---
-# 声明
+# --- 4. fs/read_write.c (核心修复) ---
+# [修复] 声明必须匹配 SukiSU 定义: void ksu_handle_sys_read(unsigned int fd)
 sed -i '1i\
 #ifdef CONFIG_KSU\
 extern void ksu_handle_sys_read(unsigned int fd);\
 #endif' fs/read_write.c
-# [核心修复] 只在 SYSCALL_DEFINE3(read, ...) 入口处注入，解决 fd 未定义报错
-# 匹配以 SYSCALL_DEFINE3(read, 开头的行，并在其后的大括号 { 后插入代码
+
+# [修复] 调用只传 fd，不传 buf 和 count
+# 精准匹配 SYSCALL_DEFINE3(read, ...) 入口
 sed -i '/^SYSCALL_DEFINE3(read,/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU\nksu_handle_sys_read(fd);\n#endif/' fs/read_write.c
 
-# --- 5. drivers/input/input.c (安全模式) ---
+# --- 5. drivers/input/input.c ---
 sed -i '1i\
 #ifdef CONFIG_KSU\
 extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\
 #endif' drivers/input/input.c
+
 sed -i '/if (disposition & INPUT_IGNORE_EVENT)/i \
 #ifdef CONFIG_KSU\
 ksu_handle_input_handle_event(&type, &code, &value);\
