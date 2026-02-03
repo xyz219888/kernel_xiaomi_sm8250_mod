@@ -39,11 +39,11 @@ curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kern
 wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch -q
 
 
-# ==================== [Step 3: 补丁与 Hook 注入 (修复版)] ====================
+# ==================== [Step 3: 补丁与 Hook 注入 (修复 git 报错版)] ====================
 echo "🔧 [3/6] 执行补丁应用与代码注入..."
 
-# [重点] 重置文件，确保干净环境
-git checkout fs/exec.c fs/open.c fs/stat.c fs/read_write.c drivers/input/input.c drivers/kernelsu/selinux/rules.c
+# [重点] 重置内核原生文件 (只重置内核自带的文件，不要重置 kernelsu 的文件)
+git checkout fs/exec.c fs/open.c fs/stat.c fs/read_write.c drivers/input/input.c
 
 # 1. 先应用 SUSFS 补丁 (防止后续 Hook 导致补丁偏移失败)
 echo "   -> 正在应用 SUSFS 补丁..."
