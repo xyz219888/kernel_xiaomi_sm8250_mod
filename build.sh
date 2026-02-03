@@ -7,7 +7,7 @@ TARGET_DEVICE="alioth"
 
 # [🚨 关键修正] 根据你上传的信息，你的补丁文件名似乎多了后缀
 # 如果你的文件在仓库里叫 "manual_hook_perfect.patchatch"，请保持下面这样：
-PATCH_FILE="manual_hook_perfect.patc"
+PATCH_FILE="manual_hook_perfect.patch"
 # 如果你已经把它改回了 "manual_hook_perfect.patch"，请把上面那行改成 .patch
 # ====================================================
 
@@ -58,7 +58,7 @@ echo "🔧 [3/6] 应用补丁..."
 
 # 1. 应用你的完美适配补丁 (注意文件名)
 echo "   正在应用 Hook 补丁: $PATCH_FILE"
-patch -p1 < "$PATCH_FILE"
+patch -p1 --ignore-whitespace < "$PATCH_FILE"
 
 # 2. 应用 SUSFS 补丁
 patch -p1 < susfs.patch
