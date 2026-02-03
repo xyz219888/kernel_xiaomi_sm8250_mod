@@ -58,7 +58,17 @@ echo "🔧 [3/6] 应用补丁..."
 
 # 1. 应用你的完美适配补丁 (注意文件名)
 echo "   正在应用 Hook 补丁: $PATCH_FILE"
-patch -p1 --ignore-whitespace < "$PATCH_FILE"
+
+# [🚨 关键修复] 强制清洗补丁文件中的隐形字符 (NBSP) 和 Windows 换行符
+# 将网页复制产生的 \xC2\xA0 (不换行空格) 替换为普通空格
+sed -i 's/\xC2\xA0/ /g' "$PATCH_FILE"
+# 再次确保没有任何非 ASCII 的空格残留
+LC_ALL=C sed -i 's/[[:space:]]\+ / /g' "$PATCH_FILE"
+# 移除 Windows 格式的回车符 (\r)
+sed -i 's/\r//g' "$PATCH_FILE"
+
+# 使用忽略空白符模式应用补丁 (这是最稳的方式)
+patch -p1 --ignore-whitespace --fuzz=3 < "$PATCH_FILE"
 
 # 2. 应用 SUSFS 补丁
 patch -p1 < susfs.patch
