@@ -2,107 +2,55 @@
 set -e
 
 # ==================== [配置区域] ====================
-# 1. 定义缓存目录 (工具和补丁存这里，不会被清理)
-CACHE_DIR="$HOME/kernel_build_cache"
-TOOLCHAIN_DIR="$HOME/zyc-clang"
-
-# 2. 目标设备
+# GitHub Actions 里的工具链路径
+TOOLCHAIN_PATH=$HOME/zyc-clang/bin
 TARGET_DEVICE="alioth"
-
-# 3. 你的补丁文件名 (必须与仓库里的一致)
+# 你的补丁文件名 (保持 .patchatch)
 PATCH_FILE="manual_hook_perfect.patchatch"
 # ====================================================
 
-# 创建缓存目录
-mkdir -p "$CACHE_DIR"
+# 0. 检查环境
+if [ ! -d "$TOOLCHAIN_PATH" ]; then
+    echo "❌ 错误：未检测到工具链，请确认 workflow 是否正确配置。"
+    exit 1
+fi
+
+# 检查补丁文件是否存在
+if [ ! -f "$PATCH_FILE" ]; then
+    echo "❌ 错误：在当前目录下找不到补丁文件: $PATCH_FILE"
+    exit 1
+fi
 
 # 环境变量设置
-export PATH="$TOOLCHAIN_DIR/bin:$PATH"
-export CCACHE_DIR="$HOME/.cache/ccache_mikernel"
+export PATH="$TOOLCHAIN_PATH:$PATH"
 export CC="ccache clang"
 export CXX="ccache clang++"
 export CLANG_TRIPLE=aarch64-linux-gnu-
 export CROSS_COMPILE=aarch64-linux-gnu-
 export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-# 编译参数
-MAKE_ARGS="ARCH=arm64 SUBARCH=arm64 O=out \
-    CC=clang \
-    CROSS_COMPILE=aarch64-linux-gnu- \
-    CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-    CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
-    CLANG_TRIPLE=aarch64-linux-gnu-"
 
-echo -e "\033[0;32m=== 🚀 本地智能编译 (缓存优化版) ===\033[0m"
+echo -e "\033[0;32m=== 🚀 开始 GitHub 云端编译 ===\033[0m"
 
-# ==================== [Step 1: 准备工具链 (跳过已下载)] ====================
-echo "🛠️ [1/7] 检查工具链..."
-if [ -f "$TOOLCHAIN_DIR/bin/clang" ]; then
-    echo "   ✅ 检测到 zyc-clang 已存在，跳过下载。"
-else
-    echo "   ⬇️ 未检测到工具链，正在下载..."
-    mkdir -p "$TOOLCHAIN_DIR"
-    # 下载到缓存目录
-    if [ ! -f "$CACHE_DIR/clang.tar.gz" ]; then
-        wget -O "$CACHE_DIR/clang.tar.gz" "https://github.com/ZyCromerZ/Clang/releases/download/15.0.7-20251111-release/Clang-15.0.7-20251111.tar.gz"
-    fi
-    echo "   📦 正在解压工具链..."
-    tar -zxvf "$CACHE_DIR/clang.tar.gz" -C "$TOOLCHAIN_DIR" >/dev/null
-fi
-
-# ==================== [Step 2: 准备 SukiSU & SUSFS (跳过已下载)] ====================
-echo "📦 [2/7] 准备组件..."
-
-# 1. 缓存 SUSFS 补丁
-if [ -f "$CACHE_DIR/susfs.patch" ]; then
-    echo "   ✅ 检测到 SUSFS 补丁缓存，跳过下载。"
-else
-    echo "   ⬇️ 下载 SUSFS 补丁..."
-    wget "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch" -O "$CACHE_DIR/susfs.patch" -q
-fi
-
-# 2. 缓存 SukiSU 脚本
-if [ -f "$CACHE_DIR/sukisu_setup.sh" ]; then
-     echo "   ✅ 检测到 SukiSU 脚本缓存，跳过下载。"
-else
-     echo "   ⬇️ 下载 SukiSU 安装脚本..."
-     curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" > "$CACHE_DIR/sukisu_setup.sh"
-fi
-
-# ==================== [Step 3: 深度清理环境 (关键!)] ====================
-echo "🧹 [3/7] 重置源码环境..."
-# 1. 撤销所有代码修改 (防止 sed 重复执行报错)
-echo "   🔄 正在回滚源码修改 (git checkout)..."
-git checkout . >/dev/null 2>&1 || true
-
-# 2. 清理构建目录 (必须删，防止旧文件冲突)
-echo "   🗑️ 清理 out/ 和 drivers/..."
-rm -rf out/ drivers/kernelsu drivers/susfs fs/susfs
+# ==================== [Step 1: 清理环境] ====================
+echo "🧹 [1/6] 清理旧构建..."
+rm -rf out/ drivers/kernelsu drivers/susfs fs/susfs AnyKernel3
 mkdir -p out
 
-# 3. 再次确认补丁文件还在 (防止被 git 清理掉)
-if [ ! -f "$PATCH_FILE" ]; then
-    echo "❌ 严重错误：清理后找不到补丁文件: $PATCH_FILE"
-    echo "   请确保该文件在仓库根目录！"
-    exit 1
-fi
+# ==================== [Step 2: 下载组件] ====================
+echo "⬇️ [2/6] 下载 SukiSU & SUSFS..."
+curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
+wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch -q
 
-# ==================== [Step 4: 安装组件] ====================
-echo "🔧 [4/7] 安装 SukiSU & SUSFS..."
-# 从缓存安装 SukiSU
-bash "$CACHE_DIR/sukisu_setup.sh" builtin
-
-# 从缓存应用 SUSFS 补丁
-patch -p1 < "$CACHE_DIR/susfs.patch"
-
-# ==================== [Step 5: 应用你的补丁] ====================
-echo "💉 [5/7] 应用核心 Hook 补丁..."
-echo "   👉 正在应用: $PATCH_FILE"
+# ==================== [Step 3: 应用补丁] ====================
+echo "🔧 [3/6] 应用补丁..."
+# 应用你的 Hook 补丁
+echo "   正在应用: $PATCH_FILE"
 patch -p1 < "$PATCH_FILE"
+# 应用 SUSFS 补丁
+patch -p1 < susfs.patch
 
-# ==================== [Step 6: 源码适配与配置] ====================
-echo "⚙️ [6/7] 执行 SukiSU 适配与 MIUI 修复..."
-
-# --- SukiSU Makefile 适配 ---
+# ==================== [Step 4: SukiSU 源码适配] ====================
+echo "💉 [4/6] 适配 SukiSU..."
 rm -f drivers/kernelsu/Kbuild
 cat > drivers/kernelsu/Makefile <<'EOF'
 ccflags-y += -DKSU_VERSION=11999 -DKSU_VERSION_FULL=\"v1.0.0-SUKISU-Custom\"
@@ -116,17 +64,18 @@ obj-$(CONFIG_KSU_MANUAL_SU) += manual_su.o
 obj-$(CONFIG_KPM) += kpm/
 EOF
 
-# --- SELinux API 修复 ---
+# 修复 SELinux API
 sed -i '1i\extern struct selinux_state selinux_state;' drivers/kernelsu/selinux/rules.c
 sed -i 's/&policydb/&selinux_state.ss->policydb/g' drivers/kernelsu/selinux/rules.c
 sed -i 's/selinux_status_update_policyload(0)/selinux_status_update_policyload(\&selinux_state, 0)/g' drivers/kernelsu/selinux/rules.c
 sed -i '1i\extern int selinux_enforcing;' drivers/kernelsu/selinux/selinux_defs.h
 sed -i 's/static inline u32 current_sid(void)/static inline u32 __ksu_ignored_current_sid(void)/' drivers/kernelsu/selinux/selinux_defs.h
 
-# --- MIUI DTS 修复 ---
+# ==================== [Step 5: MIUI 深度修复] ====================
+echo "⚙️ [5/6] 修复 MIUI 屏幕参数..."
 dts_source=arch/arm64/boot/dts/vendor/qcom
 
-# 屏幕参数
+# 替换屏幕 ID
 sed -i 's/<154>/<1537>/g' ${dts_source}/dsi-panel-j1s*
 sed -i 's/<154>/<1537>/g' ${dts_source}/dsi-panel-j2*
 sed -i 's/<155>/<1544>/g' ${dts_source}/dsi-panel-j3s-37-02-0a-dsc-video.dtsi
@@ -140,7 +89,7 @@ sed -i 's/<70>/<695>/g' ${dts_source}/dsi-panel-l11r-38-08-0a-dsc-cmd.dtsi
 sed -i 's/<71>/<710>/g' ${dts_source}/dsi-panel-j1s*
 sed -i 's/<71>/<710>/g' ${dts_source}/dsi-panel-j2*
 
-# 智能帧率与亮度
+# 修复智能帧率与亮度
 sed -i 's/\/\/ mi,mdss-dsi-pan-enable-smart-fps/mi,mdss-dsi-pan-enable-smart-fps/g' ${dts_source}/dsi-panel*
 sed -i 's/\/\/ mi,mdss-dsi-smart-fps-max_framerate/mi,mdss-dsi-smart-fps-max_framerate/g' ${dts_source}/dsi-panel*
 sed -i 's/\/\/ qcom,mdss-dsi-pan-enable-smart-fps/qcom,mdss-dsi-pan-enable-smart-fps/g' ${dts_source}/dsi-panel*
@@ -174,10 +123,11 @@ sed -i 's/\/\/39 01 00 00 00 00 05 51 07 FF 00 00/39 01 00 00 00 00 05 51 07 FF 
 sed -i 's/\/\/39 01 00 00 01 00 03 51 03 FF/39 01 00 00 01 00 03 51 03 FF/g' ${dts_source}/dsi-panel-j11-38-08-0a-fhd-cmd.dtsi
 sed -i 's/\/\/39 01 00 00 11 00 03 51 03 FF/39 01 00 00 11 00 03 51 03 FF/g' ${dts_source}/dsi-panel-j2-p2-1-38-0c-0a-dsc-cmd.dtsi
 
-# 生成 Config
-make $MAKE_ARGS ${TARGET_DEVICE}_defconfig
+# ==================== [Step 6: 编译与打包] ====================
+echo "⚙️ [6/6] 生成 Config 并编译..."
+make ${TARGET_DEVICE}_defconfig
 
-# 注入配置
+# 注入 KSU & SUSFS 配置
 scripts/config --file out/.config \
     -e KSU \
     -e KSU_MANUAL_HOOK \
@@ -226,26 +176,23 @@ scripts/config --file out/.config \
     -e MI_RECLAIM \
     -e RTMM
 
-make $MAKE_ARGS olddefconfig
-
-# ==================== [Step 7: 编译 & 打包] ====================
-echo "🚀 [7/7] 启动多核编译..."
-make $MAKE_ARGS -j$(nproc)
+make olddefconfig
+make -j$(nproc)
 
 if [ -f "out/arch/arm64/boot/Image" ]; then
-    echo -e "\033[0;32m✅ 编译成功！Image 已生成。\033[0m"
+    echo "📦 打包中..."
+    rm -rf AnyKernel3
+    git clone https://github.com/liyafe1997/AnyKernel3 -b kona --depth=1
+    rm -rf AnyKernel3/kernels/ && mkdir -p AnyKernel3/kernels/
+    cp out/arch/arm64/boot/Image AnyKernel3/kernels/
+    find out/arch/arm64/boot/dts -name '*.dtb' -exec cat {} + > AnyKernel3/kernels/dtb
     
-    # 打包流程
-    rm -rf anykernel && git clone https://github.com/liyafe1997/AnyKernel3 -b kona --depth=1 anykernel
-    rm -rf anykernel/kernels/ && mkdir -p anykernel/kernels/
-    cp out/arch/arm64/boot/Image anykernel/kernels/
-    find out/arch/arm64/boot/dts -name '*.dtb' -exec cat {} + > anykernel/kernels/dtb
-    
-    cd anykernel
-    zip -r9 "../Kernel_Alioth_KSU_SUSFS_MIUI_$(date +'%Y%m%d').zip" ./* -x .git .gitignore
+    cd AnyKernel3
+    # 命名为 Final，方便辨认
+    zip -r9 "../Kernel_Alioth_KSU_SUSFS_MIUI_Final.zip" ./* -x .git .gitignore
     cd ..
-    echo -e "\033[0;32m🎉 刷机包已生成！\033[0m"
+    echo "✅ 编译完成！文件在 AnyKernel3/ 目录下。"
 else
-    echo -e "\033[0;31m❌ 编译失败！请检查上方日志。\033[0m"
+    echo "❌ 编译失败！"
     exit 1
 fi
