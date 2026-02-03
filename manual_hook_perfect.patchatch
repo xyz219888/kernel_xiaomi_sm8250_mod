@@ -32,6 +32,7 @@ index b1b9db5..e90e89f 100644
 +
  	return __do_execve_file(fd, filename, argv, envp, flags, NULL);
  }
+
 diff --git a/fs/open.c b/fs/open.c
 index 39779f1..1dcbefb 100644
 --- a/fs/open.c
@@ -53,6 +54,7 @@ index 39779f1..1dcbefb 100644
 +#endif
  	return do_faccessat(dfd, filename, mode, 0);
  }
+
 diff --git a/fs/stat.c b/fs/stat.c
 index 357a1db..d5087ca 100644
 --- a/fs/stat.c
