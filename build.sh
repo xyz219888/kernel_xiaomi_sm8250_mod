@@ -4,14 +4,8 @@ set -e
 # ==================== [配置区域] ====================
 TOOLCHAIN_PATH=$HOME/zyc-clang/bin
 TARGET_DEVICE="alioth"
-PATCH_FILE="manual_hook_perfect.patch"
+# 注意：本方案不再需要 PATCH_FILE 变量，直接通过脚本修改代码
 # ====================================================
-
-# 0. 检查补丁 (防止文件名对不上)
-if [ ! -f "$PATCH_FILE" ]; then
-    echo "❌ 错误：在当前目录下找不到补丁文件: $PATCH_FILE"
-    exit 1
-fi
 
 # 环境变量设置
 export PATH="$TOOLCHAIN_PATH:$PATH"
@@ -43,19 +37,41 @@ echo "⬇️ [2/6] 下载 SukiSU & SUSFS..."
 curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch -q
 
-# ==================== [Step 3: 应用补丁] ====================
-echo "🔧 [3/6] 应用补丁..."
+# ==================== [Step 3: 暴力注入 Manual Hook] ====================
+echo "🔧 [3/6] 执行代码暴力注入 (不再依赖 patch 文件)..."
 
-# [重点修复] 预处理补丁文件：移除 Windows 换行符 (\r)
-# 这步操作可以防止复制粘贴时带入的隐形字符导致报错
-sed -i 's/\r//g' "$PATCH_FILE"
+# --- 1. 修改 fs/exec.c ---
+echo "   -> 正在修改 fs/exec.c..."
+# 在 return __do_execve_file 之前插入 Hook
+sed -i '/return __do_execve_file/i \
+#ifdef CONFIG_KSU\
+extern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\
+ksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);\
+#endif' fs/exec.c
 
-echo "   -> 正在应用 Hook 补丁: $PATCH_FILE"
-# 使用 --ignore-whitespace 忽略空格差异
-# 使用 --fuzz=3 允许行号有少量偏差
-patch -p1 --ignore-whitespace --fuzz=3 < "$PATCH_FILE"
+# --- 2. 修改 fs/open.c ---
+echo "   -> 正在修改 fs/open.c..."
+# 在 return do_faccessat 之前插入 Hook
+sed -i '/return do_faccessat/i \
+#ifdef CONFIG_KSU\
+extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\
+int ks_flags = 0;\
+ksu_handle_faccessat(&dfd, &filename, &mode, &ks_flags);\
+#endif' fs/open.c
 
-echo "   -> 正在应用 SUSFS 补丁..."
+# --- 3. 修改 fs/stat.c ---
+echo "   -> 正在修改 fs/stat.c..."
+# 在 error = vfs_fstatat 之前插入 Hook
+sed -i '/error = vfs_fstatat/i \
+#ifdef CONFIG_KSU\
+extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\
+ksu_handle_stat(&dfd, &filename, &flag);\
+#endif' fs/stat.c
+
+echo "   ✅ 手动 Hook 代码注入完成！"
+
+# 应用 SUSFS 补丁
+echo "   -> 应用 SUSFS 补丁..."
 patch -p1 < susfs.patch
 
 # ==================== [Step 4: SukiSU 源码适配] ====================
