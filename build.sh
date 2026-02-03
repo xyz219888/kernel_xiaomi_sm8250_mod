@@ -4,7 +4,6 @@ set -e
 # ==================== [配置区域] ====================
 TOOLCHAIN_PATH=$HOME/zyc-clang/bin
 TARGET_DEVICE="alioth"
-# 注意：本方案不再需要 PATCH_FILE 变量，直接通过脚本修改代码
 # ====================================================
 
 # 环境变量设置
@@ -38,11 +37,10 @@ curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kern
 wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch -q
 
 # ==================== [Step 3: 暴力注入 Manual Hook] ====================
-echo "🔧 [3/6] 执行代码暴力注入 (不再依赖 patch 文件)..."
+echo "🔧 [3/6] 执行代码暴力注入..."
 
 # --- 1. 修改 fs/exec.c ---
 echo "   -> 正在修改 fs/exec.c..."
-# 在 return __do_execve_file 之前插入 Hook
 sed -i '/return __do_execve_file/i \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\
@@ -51,7 +49,6 @@ ksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);\
 
 # --- 2. 修改 fs/open.c ---
 echo "   -> 正在修改 fs/open.c..."
-# 在 return do_faccessat 之前插入 Hook
 sed -i '/return do_faccessat/i \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\
@@ -61,7 +58,6 @@ ksu_handle_faccessat(&dfd, &filename, &mode, &ks_flags);\
 
 # --- 3. 修改 fs/stat.c ---
 echo "   -> 正在修改 fs/stat.c..."
-# 在 error = vfs_fstatat 之前插入 Hook
 sed -i '/error = vfs_fstatat/i \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\
@@ -70,9 +66,9 @@ ksu_handle_stat(&dfd, &filename, &flag);\
 
 echo "   ✅ 手动 Hook 代码注入完成！"
 
-# 应用 SUSFS 补丁
-echo "   -> 应用 SUSFS 补丁..."
-patch -p1 < susfs.patch
+# [🚨 关键修正] 增加 --fuzz=3 参数，解决 SUSFS 补丁行号偏移导致的报错
+echo "   -> 应用 SUSFS 补丁 (已启用自动修正模式)..."
+patch -p1 --ignore-whitespace --fuzz=3 < susfs.patch
 
 # ==================== [Step 4: SukiSU 源码适配] ====================
 echo "💉 [4/6] 执行 SukiSU 源码适配..."
