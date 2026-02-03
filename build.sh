@@ -7,7 +7,7 @@ TARGET_DEVICE="alioth"
 
 # [🚨 关键修正] 根据你上传的信息，你的补丁文件名似乎多了后缀
 # 如果你的文件在仓库里叫 "manual_hook_perfect.patchatch"，请保持下面这样：
-PATCH_FILE="manual_hook_perfect.patchatch"
+PATCH_FILE="manual_hook_perfect.patc"
 # 如果你已经把它改回了 "manual_hook_perfect.patch"，请把上面那行改成 .patch
 # ====================================================
 
