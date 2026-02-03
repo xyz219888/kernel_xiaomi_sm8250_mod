@@ -25,9 +25,11 @@ MAKE_ARGS="ARCH=arm64 SUBARCH=arm64 O=out \
 
 echo -e "\033[0;32m=== 🚀 开始编译 (适配 SM8250 + SukiSU Final) ===\033[0m"
 
-# ==================== [Step 1: 清理] ====================
+# ==================== [Step 1: 清理环境] ====================
 echo "🧹 [1/6] 执行深度清理..."
-curl -L https://github.com/ApartTUSITU/kernel_xiaomi_sm8250_mod/commit/a05557c.patch | git apply -v >/dev/null 2>&1 || true
+# 强制重置被修改的源码文件，防止重复注入报错
+git checkout fs/exec.c fs/open.c fs/stat.c drivers/kernelsu 2>/dev/null || true
+
 rm -rf drivers/kernelsu drivers/susfs fs/susfs out/
 mkdir -p out
 
@@ -39,6 +41,9 @@ wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainl
 # ==================== [Step 3: 暴力注入 Manual Hook] ====================
 echo "🔧 [3/6] 执行代码暴力注入..."
 
+# [🔥 重点修复] 先重置文件，确保干净
+git checkout fs/exec.c fs/open.c fs/stat.c
+
 # --- 1. 修改 fs/exec.c ---
 echo "   -> 正在修改 fs/exec.c..."
 sed -i '/return __do_execve_file/i \
@@ -49,12 +54,12 @@ ksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);\
 
 # --- 2. 修改 fs/open.c ---
 echo "   -> 正在修改 fs/open.c..."
-# [🚨 修复] 你的内核源码中 faccessat 的参数名为 fd，而非 dfd
+# 使用 &dfd，这是 4.19 内核的标准参数名
 sed -i '/return do_faccessat/i \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\
 int ks_flags = 0;\
-ksu_handle_faccessat(&fd, &filename, &mode, &ks_flags);\
+ksu_handle_faccessat(&dfd, &filename, &mode, &ks_flags);\
 #endif' fs/open.c
 
 # --- 3. 修改 fs/stat.c ---
@@ -75,7 +80,7 @@ echo "💉 [4/6] 执行 SukiSU 源码适配..."
 
 # 1. 生成 Makefile
 rm -f drivers/kernelsu/Kbuild
-# [优化] 添加 -DKSU_COMPAT_HAS_CURRENT_SID 防止 4.19 内核重复定义 current_sid
+# 添加 -DKSU_COMPAT_HAS_CURRENT_SID 防止重复定义
 cat > drivers/kernelsu/Makefile <<'EOF'
 ccflags-y += -DKSU_VERSION=11999 -DKSU_VERSION_FULL=\"v1.0.0-SUKISU-Custom\"
 ccflags-y += -Wno-implicit-function-declaration -Wno-strict-prototypes -Wno-int-to-pointer-cast -Wno-unused-function -Wno-unused-variable -Wno-missing-braces -Wno-declaration-after-statement
@@ -93,9 +98,12 @@ obj-$(CONFIG_KSU_MANUAL_SU) += manual_su.o
 obj-$(CONFIG_KPM) += kpm/
 EOF
 
-# [🚨 关键] 删除了所有针对 selinux/rules.c 的 sed 修改
-# 既然 SukiSU 源码已经自带了兼容 4.19 的逻辑，我们就不要去破坏它。
-echo "   -> 已跳过错误的 SELinux 修改，使用 SukiSU 原生兼容逻辑。"
+# 2. [🔥 重点修复] 修复 selinux_enforcing 未声明错误
+# 这一步参考了你提供的旧脚本 build (4).sh
+sed -i '1i\extern int selinux_enforcing;' drivers/kernelsu/selinux/selinux_defs.h
+
+# 3. [🔥 重点修复] 仅替换 current_sid，不替换 policydb（防止拼接错误）
+sed -i 's/static inline u32 current_sid(void)/static inline u32 __ksu_ignored_current_sid(void)/' drivers/kernelsu/selinux/selinux_defs.h
 
 # ==================== [Step 5: MIUI DTS & Config] ====================
 echo "⚙️ [5/6] 执行 MIUI 深度适配..."
