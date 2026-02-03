@@ -39,101 +39,90 @@ curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kern
 wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch -q
 
 
-# ==================== [Step 3: 暴力注入 Manual Hook (修复版)] ====================
-echo "🔧 [3/6] 执行代码暴力注入 (SukiSU 修复版)..."
+# ==================== [Step 3: 补丁与 Hook 注入 (修复版)] ====================
+echo "🔧 [3/6] 执行补丁应用与代码注入..."
 
-# 重置文件，防止重复修改
-git checkout fs/exec.c fs/open.c fs/stat.c fs/read_write.c drivers/input/input.c
+# [重点] 重置文件，确保干净环境
+git checkout fs/exec.c fs/open.c fs/stat.c fs/read_write.c drivers/input/input.c drivers/kernelsu/selinux/rules.c
 
-# -------------------------------------------------------------------
-# 1. 修改 fs/exec.c (模块加载、Root授权)
-# -------------------------------------------------------------------
-echo "   -> 正在修改 fs/exec.c..."
+# 1. 先应用 SUSFS 补丁 (防止后续 Hook 导致补丁偏移失败)
+echo "   -> 正在应用 SUSFS 补丁..."
+if [ -f "susfs.patch" ]; then
+    patch -p1 --ignore-whitespace --fuzz=3 < susfs.patch || { echo "❌ SUSFS 补丁应用失败！"; exit 1; }
+else
+    echo "⚠️ 未找到 susfs.patch，跳过..."
+fi
+
+echo "   -> 正在执行 SukiSU Manual Hook..."
+
+# --- 1. fs/exec.c (模块加载核心) ---
+# 声明
 sed -i '1i\
 #ifdef CONFIG_KSU\
 extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\
 #endif' fs/exec.c
-
+# 注入 (在 do_execveat_common 或 __do_execve_file 返回前)
 sed -i '/return __do_execve_file/i \
 #ifdef CONFIG_KSU\
 ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\
 #endif' fs/exec.c
 
-# -------------------------------------------------------------------
-# 2. 修改 fs/open.c (核心修复：解决 C99 变量声明报错)
-# -------------------------------------------------------------------
-echo "   -> 正在修改 fs/open.c..."
+# --- 2. fs/open.c (隐藏 su) ---
+# 声明
 sed -i '1i\
 #ifdef CONFIG_KSU\
 extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\
 #endif' fs/open.c
-
-# [核心修复点] 使用 { } 包裹代码块，允许在函数中间声明 int ks_flags
-# 针对 faccessat (有 dfd 参数)
+# 注入 faccessat (有 dfd)
 sed -i '/return do_faccessat(dfd,/i \
 #ifdef CONFIG_KSU\
 { int ks_flags = 0; ksu_handle_faccessat(&dfd, &filename, &mode, &ks_flags); }\
 #endif' fs/open.c
-
-# 针对 access (无 dfd 参数)
+# 注入 access (无 dfd，需手动定义 AT_FDCWD)
 sed -i '/return do_faccessat(AT_FDCWD,/i \
 #ifdef CONFIG_KSU\
 { int dfd = AT_FDCWD; int ks_flags = 0; ksu_handle_faccessat(&dfd, &filename, &mode, &ks_flags); }\
 #endif' fs/open.c
 
-# -------------------------------------------------------------------
-# 3. 修改 fs/stat.c (SUSFS 隐藏文件状态)
-# -------------------------------------------------------------------
-echo "   -> 正在修改 fs/stat.c..."
+# --- 3. fs/stat.c (SUSFS 隐藏) ---
+# 声明
 sed -i '1i\
 #ifdef CONFIG_KSU\
 extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\
 extern void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr);\
 #endif' fs/stat.c
-
+# 注入 vfs_fstatat
 sed -i '/error = vfs_fstatat/i \
 #ifdef CONFIG_KSU\
 ksu_handle_stat(&dfd, &filename, &flag);\
 #endif' fs/stat.c
-
+# 注入 vfs_fstat (通常在 vfs_getattr 之后)
 sed -i '/return error;/i \
 #ifdef CONFIG_KSU\
 if (!error) ksu_handle_vfs_fstat(fd, &stat->size);\
 #endif' fs/stat.c
 
-# -------------------------------------------------------------------
-# 4. 修改 fs/read_write.c (开机自启注入 init.rc)
-# -------------------------------------------------------------------
-echo "   -> 正在修改 fs/read_write.c..."
+# --- 4. fs/read_write.c (修复版：精准定位 syscall) ---
+# 声明
 sed -i '1i\
 #ifdef CONFIG_KSU\
 extern void ksu_handle_sys_read(unsigned int fd);\
 #endif' fs/read_write.c
+# [核心修复] 只在 SYSCALL_DEFINE3(read, ...) 入口处注入，解决 fd 未定义报错
+# 匹配以 SYSCALL_DEFINE3(read, 开头的行，并在其后的大括号 { 后插入代码
+sed -i '/^SYSCALL_DEFINE3(read,/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU\nksu_handle_sys_read(fd);\n#endif/' fs/read_write.c
 
-sed -i '/return ret;/i \
-#ifdef CONFIG_KSU\
-if (ret > 0) ksu_handle_sys_read(fd);\
-#endif' fs/read_write.c
-
-# -------------------------------------------------------------------
-# 5. 修改 drivers/input/input.c (安全模式)
-# -------------------------------------------------------------------
-echo "   -> 正在修改 drivers/input/input.c..."
+# --- 5. drivers/input/input.c (安全模式) ---
 sed -i '1i\
 #ifdef CONFIG_KSU\
 extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\
 #endif' drivers/input/input.c
-
 sed -i '/if (disposition & INPUT_IGNORE_EVENT)/i \
 #ifdef CONFIG_KSU\
 ksu_handle_input_handle_event(&type, &code, &value);\
 #endif' drivers/input/input.c
 
-echo "   ✅ SukiSU Hook 代码注入全部完成！"
-
-echo "   -> 应用 SUSFS 补丁..."
-patch -p1 --ignore-whitespace --fuzz=3 < susfs.patch
-
+echo "   ✅ SukiSU Hook 代码注入完成！"
 
 # ==================== [Step 4: SukiSU 源码适配 (修复版)] ====================
 echo "💉 [4/6] 执行 SukiSU 源码适配..."
@@ -157,21 +146,22 @@ obj-$(CONFIG_KSU_MANUAL_SU) += manual_su.o
 obj-$(CONFIG_KPM) += kpm/
 EOF
 
-# 2. [修复] 补充 policydb 和 selinux_state 声明
-# 修复 drivers/kernelsu/selinux/rules.c 中的 "undeclared identifier"
+# 2. [修复] 补全 SELinux 声明 (解决 policydb 未定义)
 sed -i '1i\
 extern struct policydb policydb;\
 extern struct selinux_state selinux_state;' drivers/kernelsu/selinux/rules.c
 
-# 3. [修复] 修正 selinux_status_update_policyload 参数调用
-# 将 selinux_status_update_policyload(0) 改为 selinux_status_update_policyload(&selinux_state, 0)
+# 3. [修复] 修正函数调用参数 (解决 too few arguments)
+# 将 selinux_status_update_policyload(0) 改为传入 &selinux_state
 sed -i 's/selinux_status_update_policyload(0);/selinux_status_update_policyload(\&selinux_state, 0);/g' drivers/kernelsu/selinux/rules.c
 
-# 4. 修复 selinux_enforcing 未声明错误
+# 4. [修复] 补全 selinux_enforcing 声明
 sed -i '1i\extern int selinux_enforcing;' drivers/kernelsu/selinux/selinux_defs.h
 
-# 5. 仅替换 current_sid，不替换 policydb
+# 5. 屏蔽 current_sid 冲突
 sed -i 's/static inline u32 current_sid(void)/static inline u32 __ksu_ignored_current_sid(void)/' drivers/kernelsu/selinux/selinux_defs.h
+
+echo "   ✅ SukiSU 源码适配完成！"
 
 # ==================== [Step 5: MIUI DTS & Config] ====================
 echo "⚙️ [5/6] 执行 MIUI 深度适配..."
