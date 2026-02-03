@@ -26,41 +26,37 @@ MAKE_ARGS="ARCH=arm64 SUBARCH=arm64 O=out \
 echo -e "\033[0;32m=== 🚀 开始编译 (适配 SM8250 + SukiSU Final) ===\033[0m"
 
 # ==================== [Step 1: 优先级最高 - 深度清理] ====================
-echo "🧹 [1/6] 执行深度清理 (源码分析版)..."
+echo "🧹 [1/6] 执行深度清理 (Fixed)..."
 
-# 1. [保留] 运行您的清理补丁 (基础清理)
+# 1. [保留] 运行清理补丁
 curl -L https://github.com/ApartTUSITU/kernel_xiaomi_sm8250_mod/commit/a05557c.patch | git apply -v >/dev/null 2>&1 || true
 
 # 2. [保留] 删除冲突目录
+# 注意：这会删除 drivers/kernelsu，所以后续不需要再清理该目录下的文件
 rm -rf drivers/kernelsu drivers/susfs fs/susfs out/
 mkdir -p out
 
-# 3. [关键] 手动重置核心文件
-# 这一步确保我们在“最干净”的基础上操作，但这还不够，因为git可能还原出带残留的版本
-echo "   -> 正在重置核心文件..."
+# 3. [关键] 重置核心源码文件
+echo "   -> 正在重置核心源码..."
 git checkout fs/exec.c fs/open.c fs/stat.c fs/read_write.c drivers/input/input.c 2>/dev/null || true
 
-# 4. [核弹级清洗] 强制删除所有已知的报错残留
-# 无论文件里有什么，只要匹配到这些特征，统统删掉！
-
+# 4. [核弹级清洗] 强制删除所有残留
 echo "   -> 正在粉碎残留代码..."
 
-# (A) 删除所有主 Hook 声明
+# (A) 删除所有带 ksu_handle 的主声明行
 sed -i '/ksu_handle/d' fs/exec.c fs/open.c fs/stat.c fs/read_write.c drivers/input/input.c
 
-# (B) [🔥 重点] 删除 fs/open.c 中的断行残留 (解决 extraneous ')' 报错)
-# 这些是您报错日志中出现的具体代码片段
+# (B) [🔥 fs/read_write.c] 删除参数断行残留
+sed -i '/size_t \*count_ptr);/d' fs/read_write.c
+sed -i '/char __user \*\*buf_ptr,/d' fs/read_write.c
+
+# (C) [🔥 fs/open.c] 删除参数断行残留
 sed -i '/int \*flags);/d' fs/open.c
 sed -i '/int \*mode, int \*flags);/d' fs/open.c
 sed -i '/const char __user \*\*filename_user/d' fs/open.c
 sed -i '/int ks_flags = 0;/d' fs/open.c
 
-# (C) [🔥 重点] 删除 fs/read_write.c 中的断行残留 (解决 conflicting types 报错)
-sed -i '/size_t \*count_ptr);/d' fs/read_write.c
-sed -i '/char __user \*\*buf_ptr,/d' fs/read_write.c
-
-# (D) 删除其他可能残留
-sed -i '/extern int selinux_enforcing;/d' drivers/kernelsu/selinux/selinux_defs.h
+# (D) [已删除] 去掉了对 drivers/kernelsu/... 的操作，防止报错
 
 echo "   ✅ 深度清理完成！源码环境已纯净。"
 
