@@ -85,3 +85,4 @@ index 357a1db..d5087ca 100644
  	error = vfs_fstatat(dfd, filename, &stat, flag);
  	if (error)
  		return error;
+ }
