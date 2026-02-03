@@ -26,34 +26,43 @@ MAKE_ARGS="ARCH=arm64 SUBARCH=arm64 O=out \
 echo -e "\033[0;32m=== 🚀 开始编译 (适配 SM8250 + SukiSU Final) ===\033[0m"
 
 # ==================== [Step 1: 优先级最高 - 深度清理] ====================
-echo "🧹 [1/6] 执行深度清理 (Fusion Mode Fix)..."
+echo "🧹 [1/6] 执行深度清理 (源码分析版)..."
 
-# 1. [保留] 运行清理补丁
+# 1. [保留] 运行您的清理补丁 (基础清理)
 curl -L https://github.com/ApartTUSITU/kernel_xiaomi_sm8250_mod/commit/a05557c.patch | git apply -v >/dev/null 2>&1 || true
 
 # 2. [保留] 删除冲突目录
-# 注意：这一步会删除 drivers/kernelsu，所以后面不能再操作这个目录下的文件
 rm -rf drivers/kernelsu drivers/susfs fs/susfs out/
 mkdir -p out
 
-# 3. [融合修复] 手动清洗残留
-echo "   -> 正在执行手术级清理..."
-# 先重置文件状态
+# 3. [关键] 手动重置核心文件
+# 这一步确保我们在“最干净”的基础上操作，但这还不够，因为git可能还原出带残留的版本
+echo "   -> 正在重置核心文件..."
 git checkout fs/exec.c fs/open.c fs/stat.c fs/read_write.c drivers/input/input.c 2>/dev/null || true
 
-# (1) 删除所有包含 ksu_handle 的主声明行
+# 4. [核弹级清洗] 强制删除所有已知的报错残留
+# 无论文件里有什么，只要匹配到这些特征，统统删掉！
+
+echo "   -> 正在粉碎残留代码..."
+
+# (A) 删除所有主 Hook 声明
 sed -i '/ksu_handle/d' fs/exec.c fs/open.c fs/stat.c fs/read_write.c drivers/input/input.c
 
-# (2) [您的代码] 清除多行声明留下的“尸体” (fs/open.c)
+# (B) [🔥 重点] 删除 fs/open.c 中的断行残留 (解决 extraneous ')' 报错)
+# 这些是您报错日志中出现的具体代码片段
 sed -i '/int \*flags);/d' fs/open.c
 sed -i '/int \*mode, int \*flags);/d' fs/open.c
 sed -i '/const char __user \*\*filename_user/d' fs/open.c
-
-# (3) 清除残留变量和定义
 sed -i '/int ks_flags = 0;/d' fs/open.c
-# [已删除] 删除了针对 drivers/kernelsu/... 的 sed 命令，因为该目录已在第2步被删除
 
-echo "   ✅ 深度清理完成！源码已纯净。"
+# (C) [🔥 重点] 删除 fs/read_write.c 中的断行残留 (解决 conflicting types 报错)
+sed -i '/size_t \*count_ptr);/d' fs/read_write.c
+sed -i '/char __user \*\*buf_ptr,/d' fs/read_write.c
+
+# (D) 删除其他可能残留
+sed -i '/extern int selinux_enforcing;/d' drivers/kernelsu/selinux/selinux_defs.h
+
+echo "   ✅ 深度清理完成！源码环境已纯净。"
 
 # ==================== [Step 2: 下载组件] ====================
 echo "⬇️ [2/6] 下载 SukiSU & SUSFS..."
@@ -62,7 +71,7 @@ wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainl
 
 
 # ==================== [Step 3: 补丁与 Hook 注入] ====================
-echo "🔧 [3/6] 执行代码注入 (Safe Mode)..."
+echo "🔧 [3/6] 执行代码注入 (源码适配版)..."
 
 # 1. 应用 SUSFS 补丁
 echo "   -> 正在应用 SUSFS 补丁..."
@@ -74,33 +83,41 @@ fi
 
 echo "   -> 正在执行 SukiSU Manual Hook..."
 
-# --- 1. fs/exec.c ---
-# 单行注入，干净利落
+# --- 1. fs/exec.c (Hook execveat) ---
+# 声明
 sed -i '1i\#ifdef CONFIG_KSU\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n#endif' fs/exec.c
+# 注入: 尝试匹配 do_execveat_common 或 __do_execve_file (兼容不同内核写法)
 sed -i '/return __do_execve_file/i \#ifdef CONFIG_KSU\nksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n#endif' fs/exec.c
+# 备用注入: 如果上面没匹配到，尝试匹配 do_execveat
+sed -i '/return do_execveat/i \#ifdef CONFIG_KSU\nksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n#endif' fs/exec.c
 
-# --- 2. fs/open.c ---
+# --- 2. fs/open.c (Hook faccessat) ---
 # 声明
 sed -i '1i\#ifdef CONFIG_KSU\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n#endif' fs/open.c
-# 注入 (使用 {} 包裹变量)
+# 注入 (针对 faccessat 系统调用)
 sed -i '/return do_faccessat(dfd,/i \#ifdef CONFIG_KSU\n{ int ks_flags = 0; ksu_handle_faccessat(&dfd, &filename, &mode, &ks_flags); }\n#endif' fs/open.c
+# 注入 (针对 access 系统调用)
 sed -i '/return do_faccessat(AT_FDCWD,/i \#ifdef CONFIG_KSU\n{ int dfd = AT_FDCWD; int ks_flags = 0; ksu_handle_faccessat(&dfd, &filename, &mode, &ks_flags); }\n#endif' fs/open.c
 
-# --- 3. fs/stat.c ---
+# --- 3. fs/stat.c (Hook stat) ---
 # 声明
 sed -i '1i\#ifdef CONFIG_KSU\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\nextern void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr);\n#endif' fs/stat.c
-# 注入
+# 注入 vfs_fstatat
 sed -i '/error = vfs_fstatat/i \#ifdef CONFIG_KSU\nksu_handle_stat(&dfd, &filename, &flag);\n#endif' fs/stat.c
+# 注入 vfs_fstat
 sed -i '/return error;/i \#ifdef CONFIG_KSU\nif (!error) ksu_handle_vfs_fstat(fd, &stat->size);\n#endif' fs/stat.c
 
-# --- 4. fs/read_write.c ---
-# [关键] 声明 void 类型，单参数 (修复 conflicting types)
+# --- 4. fs/read_write.c (Hook read) ---
+# [关键修复] 声明 void 类型，单参数 (完美匹配 SukiSU ksud.c)
 sed -i '1i\#ifdef CONFIG_KSU\nextern void ksu_handle_sys_read(unsigned int fd);\n#endif' fs/read_write.c
-# 注入 (精准定位 read 系统调用)
+# 注入: 精准定位到 SYSCALL_DEFINE3(read, ...) 的开头
+# 这里的逻辑是：找到 read 系统调用定义行，在后面的第一个 { 后插入代码
 sed -i '/^SYSCALL_DEFINE3(read,/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU\nksu_handle_sys_read(fd);\n#endif/' fs/read_write.c
 
-# --- 5. drivers/input/input.c ---
+# --- 5. drivers/input/input.c (Hook input) ---
+# 声明
 sed -i '1i\#ifdef CONFIG_KSU\nextern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\n#endif' drivers/input/input.c
+# 注入: 在 input_handle_event 函数内
 sed -i '/if (disposition & INPUT_IGNORE_EVENT)/i \#ifdef CONFIG_KSU\nksu_handle_input_handle_event(&type, &code, &value);\n#endif' drivers/input/input.c
 
 echo "   ✅ SukiSU Hook 代码注入完成！"
