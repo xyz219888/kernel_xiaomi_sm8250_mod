@@ -15,6 +15,7 @@ jobs:
       run: |
         sudo apt update
         sudo apt install -y build-essential git curl wget bison flex zip bc cpio libssl-dev ccache python-is-python3 tar
+
     - name: Setup zyc-clang toolchain
       run: |
         mkdir -p $HOME/zyc-clang
@@ -22,9 +23,18 @@ jobs:
         wget https://github.com/ZyCromerZ/Clang/releases/download/15.0.7-20251111-release/Clang-15.0.7-20251111.tar.gz
         tar -zxvf Clang-15.0.7-20251111.tar.gz
         cd $GITHUB_WORKSPACE
+
     # 赋予脚本执行权限 (防止 Permission denied)
     - name: Make script executable
       run: chmod +x build.sh
+
+    # 新增：把 build.sh 的修改提交到本地工作树（避免脚本检测到脏工作树）
+    - name: Commit build.sh if changed
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git add build.sh || true
+        git commit -m "Make build.sh executable / add build script" || echo "no changes to commit"
 
     # 编译 Alioth
     - name: Build kernel for Alioth
