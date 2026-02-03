@@ -1,40 +1,38 @@
-name: Build Alioth Kernel (Final)
-
+name: Build Alioth Kernel (Only KSU/SUSFS)
 on:
-  workflow_dispatch:  # 允许手动点击按钮触发
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    
     steps:
-    - name: Checkout Source Code
+    - name: Checkout source
       uses: actions/checkout@v4
       with:
         fetch-depth: 1
 
-    - name: Install Dependencies
+    - name: Install dependencies
       run: |
-        sudo apt update && sudo apt upgrade -y
+        sudo apt update
         sudo apt install -y build-essential git curl wget bison flex zip bc cpio libssl-dev ccache python-is-python3 tar
-
-    - name: Setup zyc-clang Toolchain
+    - name: Setup zyc-clang toolchain
       run: |
         mkdir -p $HOME/zyc-clang
         cd $HOME/zyc-clang
-        # 下载并解压工具链
-        wget -q https://github.com/ZyCromerZ/Clang/releases/download/15.0.7-20251111-release/Clang-15.0.7-20251111.tar.gz
-        tar -zxvf Clang-15.0.7-20251111.tar.gz > /dev/null
-        rm Clang-15.0.7-20251111.tar.gz
-        echo "Toolchain setup complete."
+        wget https://github.com/ZyCromerZ/Clang/releases/download/15.0.7-20251111-release/Clang-15.0.7-20251111.tar.gz
+        tar -zxvf Clang-15.0.7-20251111.tar.gz
+        cd $GITHUB_WORKSPACE
+    # 赋予脚本执行权限 (防止 Permission denied)
+    - name: Make script executable
+      run: chmod +x build.sh
 
-    - name: Run Build Script
+    # 编译 Alioth
+    - name: Build kernel for Alioth
       run: |
-        chmod +x build.sh
-        bash build.sh
-
-    - name: Upload Artifact
+        bash build.sh alioth
+    # 上传产物 (已修复文件名匹配)
+    - name: Upload zip
       uses: actions/upload-artifact@v4
       with:
-        name: Kernel_Alioth_KSU_SUSFS_MIUI
-        path: AnyKernel3/*.zip
+        name: Kernel_Alioth_KSU_SUSFS
+        path: Kernel_Alioth_KSU_SUSFS_*.zip
