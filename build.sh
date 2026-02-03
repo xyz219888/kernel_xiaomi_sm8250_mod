@@ -25,14 +25,13 @@ MAKE_ARGS="ARCH=arm64 SUBARCH=arm64 O=out \
 
 echo -e "\033[0;32m=== 🚀 开始编译 (适配 SM8250 + SukiSU Final) ===\033[0m"
 
-# ==================== [Step 1: 清理环境] ====================
+# ==================== [Step 1: 优先级最高 - 清理] ====================
 echo "🧹 [1/6] 执行深度清理..."
-# 强制重置被修改的源码文件，防止重复注入报错
-git checkout fs/exec.c fs/open.c fs/stat.c drivers/kernelsu 2>/dev/null || true
-
+# 回滚可能存在的旧修改
+curl -L https://github.com/ApartTUSITU/kernel_xiaomi_sm8250_mod/commit/a05557c.patch | git apply -v >/dev/null 2>&1 || true
+# 删除冲突目录
 rm -rf drivers/kernelsu drivers/susfs fs/susfs out/
 mkdir -p out
-
 # ==================== [Step 2: 下载组件] ====================
 echo "⬇️ [2/6] 下载 SukiSU & SUSFS..."
 curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
