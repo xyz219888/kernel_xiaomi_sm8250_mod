@@ -26,17 +26,17 @@ MAKE_ARGS="ARCH=arm64 SUBARCH=arm64 O=out \
 echo -e "\033[0;32m=== 🚀 开始编译 (适配 SM8250 + SukiSU Final) ===\033[0m"
 
 # ==================== [Step 1: 优先级最高 - 深度清理] ====================
-echo "🧹 [1/6] 执行深度清理 (Fusion Mode)..."
+echo "🧹 [1/6] 执行深度清理 (Fusion Mode Fix)..."
 
-# 1. [保留] 运行清理补丁 (您的要求)
-# 这是第一道防线，清除大部分 KSU/SUSFS 修改
+# 1. [保留] 运行清理补丁
 curl -L https://github.com/ApartTUSITU/kernel_xiaomi_sm8250_mod/commit/a05557c.patch | git apply -v >/dev/null 2>&1 || true
 
 # 2. [保留] 删除冲突目录
+# 注意：这一步会删除 drivers/kernelsu，所以后面不能再操作这个目录下的文件
 rm -rf drivers/kernelsu drivers/susfs fs/susfs out/
 mkdir -p out
 
-# 3. [融合修复] 手动清洗残留 (您提供的精准清理逻辑)
+# 3. [融合修复] 手动清洗残留
 echo "   -> 正在执行手术级清理..."
 # 先重置文件状态
 git checkout fs/exec.c fs/open.c fs/stat.c fs/read_write.c drivers/input/input.c 2>/dev/null || true
@@ -45,14 +45,13 @@ git checkout fs/exec.c fs/open.c fs/stat.c fs/read_write.c drivers/input/input.c
 sed -i '/ksu_handle/d' fs/exec.c fs/open.c fs/stat.c fs/read_write.c drivers/input/input.c
 
 # (2) [您的代码] 清除多行声明留下的“尸体” (fs/open.c)
-# 这些特定的 sed 命令能完美解决 extraneous ')' 报错
 sed -i '/int \*flags);/d' fs/open.c
 sed -i '/int \*mode, int \*flags);/d' fs/open.c
 sed -i '/const char __user \*\*filename_user/d' fs/open.c
 
 # (3) 清除残留变量和定义
 sed -i '/int ks_flags = 0;/d' fs/open.c
-sed -i '/extern int selinux_enforcing;/d' drivers/kernelsu/selinux/selinux_defs.h
+# [已删除] 删除了针对 drivers/kernelsu/... 的 sed 命令，因为该目录已在第2步被删除
 
 echo "   ✅ 深度清理完成！源码已纯净。"
 
