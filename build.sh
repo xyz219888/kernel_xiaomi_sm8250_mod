@@ -25,7 +25,7 @@ MAKE_ARGS="ARCH=arm64 SUBARCH=arm64 O=out \
 
 echo -e "\033[0;32m=== 🚀 开始编译 (适配 SM8250 + SukiSU Final) ===\033[0m"
 
-# ==================== [Step 1: 优先级最高 - 清理] ====================
+# ==================== [Step 1: 清理] ====================
 echo "🧹 [1/6] 执行深度清理..."
 curl -L https://github.com/ApartTUSITU/kernel_xiaomi_sm8250_mod/commit/a05557c.patch | git apply -v >/dev/null 2>&1 || true
 rm -rf drivers/kernelsu drivers/susfs fs/susfs out/
@@ -36,8 +36,8 @@ echo "⬇️ [2/6] 下载 SukiSU & SUSFS..."
 curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch -q
 
-# ==================== [Step 3: 暴力注入 Manual Hook] ====================
-echo "🔧 [3/6] 执行代码暴力注入..."
+# ==================== [Step 3: 智能代码注入] ====================
+echo "🔧 [3/6] 执行代码智能注入..."
 
 # --- 1. 修改 fs/exec.c ---
 echo "   -> 正在修改 fs/exec.c..."
@@ -47,14 +47,22 @@ extern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr,
 ksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);\
 #endif' fs/exec.c
 
-# --- 2. 修改 fs/open.c ---
+# --- 2. 修改 fs/open.c (含变量名检测) ---
 echo "   -> 正在修改 fs/open.c..."
-sed -i '/return do_faccessat/i \
-#ifdef CONFIG_KSU\
-extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\
-int ks_flags = 0;\
-ksu_handle_faccessat(&dfd, &filename, &mode, &ks_flags);\
-#endif' fs/open.c
+# [🚨 关键修复] 自动检测 faccessat 的参数是 dfd 还是 fd
+FD_ARG="dfd"
+if grep -q "SYSCALL_DEFINE3(faccessat,.*int, fd," fs/open.c; then
+    echo "      ⚠️ 检测到非标准变量名: 使用 'fd' 代替 'dfd'"
+    FD_ARG="fd"
+fi
+
+# 使用双引号 sed 以支持变量替换
+sed -i "/return do_faccessat/i \\
+#ifdef CONFIG_KSU\\
+extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\\
+int ks_flags = 0;\\
+ksu_handle_faccessat(&$FD_ARG, &filename, &mode, &ks_flags);\\
+#endif" fs/open.c
 
 # --- 3. 修改 fs/stat.c ---
 echo "   -> 正在修改 fs/stat.c..."
@@ -64,10 +72,9 @@ extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *fla
 ksu_handle_stat(&dfd, &filename, &flag);\
 #endif' fs/stat.c
 
-echo "   ✅ 手动 Hook 代码注入完成！"
+echo "   ✅ Hook 代码注入完成！"
 
-# [🚨 关键修正] 增加 --fuzz=3 参数，解决 SUSFS 补丁行号偏移导致的报错
-echo "   -> 应用 SUSFS 补丁 (已启用自动修正模式)..."
+echo "   -> 应用 SUSFS 补丁..."
 patch -p1 --ignore-whitespace --fuzz=3 < susfs.patch
 
 # ==================== [Step 4: SukiSU 源码适配] ====================
@@ -96,8 +103,8 @@ sed -i 's/selinux_status_update_policyload(0)/selinux_status_update_policyload(\
 sed -i '1i\extern int selinux_enforcing;' drivers/kernelsu/selinux/selinux_defs.h
 sed -i 's/static inline u32 current_sid(void)/static inline u32 __ksu_ignored_current_sid(void)/' drivers/kernelsu/selinux/selinux_defs.h
 
-# ==================== [Step 5: MIUI DTS 修复 & 配置生成] ====================
-echo "⚙️ [5/6] 执行 MIUI 深度适配 (DTS & Config)..."
+# ==================== [Step 5: MIUI DTS & Config] ====================
+echo "⚙️ [5/6] 执行 MIUI 深度适配..."
 
 dts_source=arch/arm64/boot/dts/vendor/qcom
 
