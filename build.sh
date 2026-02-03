@@ -39,104 +39,91 @@ curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kern
 wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch -q
 
 
-# ==================== [Step 3: 暴力注入 Manual Hook (SukiSU 完整版)] ====================
-echo "🔧 [3/6] 执行代码暴力注入 (SukiSU 完整适配版)..."
+# ==================== [Step 3: 暴力注入 Manual Hook (修复版)] ====================
+echo "🔧 [3/6] 执行代码暴力注入 (SukiSU 修复版)..."
 
-# [🔥 重点] 先重置文件，防止重复注入导致编译失败
+# 重置文件，防止重复修改
 git checkout fs/exec.c fs/open.c fs/stat.c fs/read_write.c drivers/input/input.c
 
 # -------------------------------------------------------------------
-# 1. 修改 fs/exec.c (核心：模块加载、Root授权)
+# 1. 修改 fs/exec.c (模块加载、Root授权)
 # -------------------------------------------------------------------
 echo "   -> 正在修改 fs/exec.c..."
-# 插入声明 (使用总入口 ksu_handle_execveat，而不是 sucompat)
 sed -i '1i\
 #ifdef CONFIG_KSU\
 extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\
 #endif' fs/exec.c
 
-# 插入调用 (在 return __do_execve_file 之前)
 sed -i '/return __do_execve_file/i \
 #ifdef CONFIG_KSU\
 ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\
 #endif' fs/exec.c
 
 # -------------------------------------------------------------------
-# 2. 修改 fs/open.c (核心：隐藏 su 二进制)
+# 2. 修改 fs/open.c (核心修复：解决 C99 变量声明报错)
 # -------------------------------------------------------------------
 echo "   -> 正在修改 fs/open.c..."
-# 插入声明
 sed -i '1i\
 #ifdef CONFIG_KSU\
 extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\
 #endif' fs/open.c
 
+# [核心修复点] 使用 { } 包裹代码块，允许在函数中间声明 int ks_flags
 # 针对 faccessat (有 dfd 参数)
 sed -i '/return do_faccessat(dfd,/i \
 #ifdef CONFIG_KSU\
-int ks_flags = 0;\
-ksu_handle_faccessat(&dfd, &filename, &mode, &ks_flags);\
+{ int ks_flags = 0; ksu_handle_faccessat(&dfd, &filename, &mode, &ks_flags); }\
 #endif' fs/open.c
 
-# 针对 access (无 dfd 参数，需手动定义)
+# 针对 access (无 dfd 参数)
 sed -i '/return do_faccessat(AT_FDCWD,/i \
 #ifdef CONFIG_KSU\
-int dfd = AT_FDCWD;\
-int ks_flags = 0;\
-ksu_handle_faccessat(&dfd, &filename, &mode, &ks_flags);\
+{ int dfd = AT_FDCWD; int ks_flags = 0; ksu_handle_faccessat(&dfd, &filename, &mode, &ks_flags); }\
 #endif' fs/open.c
 
 # -------------------------------------------------------------------
-# 3. 修改 fs/stat.c (核心：SUSFS 隐藏文件状态)
+# 3. 修改 fs/stat.c (SUSFS 隐藏文件状态)
 # -------------------------------------------------------------------
 echo "   -> 正在修改 fs/stat.c..."
-# 插入声明 (包含 vfs_fstatat 和 vfs_fstat)
 sed -i '1i\
 #ifdef CONFIG_KSU\
 extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\
 extern void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr);\
 #endif' fs/stat.c
 
-# Hook vfs_fstatat (针对路径)
 sed -i '/error = vfs_fstatat/i \
 #ifdef CONFIG_KSU\
 ksu_handle_stat(&dfd, &filename, &flag);\
 #endif' fs/stat.c
 
-# Hook vfs_fstat (针对文件描述符，SUSFS 需要)
-# 通常在 vfs_getattr 之后，return error 之前
 sed -i '/return error;/i \
 #ifdef CONFIG_KSU\
 if (!error) ksu_handle_vfs_fstat(fd, &stat->size);\
 #endif' fs/stat.c
 
 # -------------------------------------------------------------------
-# 4. 修改 fs/read_write.c (核心：开机自启注入 init.rc)
+# 4. 修改 fs/read_write.c (开机自启注入 init.rc)
 # -------------------------------------------------------------------
 echo "   -> 正在修改 fs/read_write.c..."
-# 插入声明
 sed -i '1i\
 #ifdef CONFIG_KSU\
 extern void ksu_handle_sys_read(unsigned int fd);\
 #endif' fs/read_write.c
 
-# 插入调用 (在 vfs_read 函数末尾，return ret 之前)
 sed -i '/return ret;/i \
 #ifdef CONFIG_KSU\
 if (ret > 0) ksu_handle_sys_read(fd);\
 #endif' fs/read_write.c
 
 # -------------------------------------------------------------------
-# 5. 修改 drivers/input/input.c (核心：安全模式救砖)
+# 5. 修改 drivers/input/input.c (安全模式)
 # -------------------------------------------------------------------
 echo "   -> 正在修改 drivers/input/input.c..."
-# 插入声明
 sed -i '1i\
 #ifdef CONFIG_KSU\
 extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\
 #endif' drivers/input/input.c
 
-# 插入调用 (在 input_handle_event 函数开头或处理逻辑前)
 sed -i '/if (disposition & INPUT_IGNORE_EVENT)/i \
 #ifdef CONFIG_KSU\
 ksu_handle_input_handle_event(&type, &code, &value);\
@@ -144,17 +131,15 @@ ksu_handle_input_handle_event(&type, &code, &value);\
 
 echo "   ✅ SukiSU Hook 代码注入全部完成！"
 
-# 应用 SUSFS 补丁
 echo "   -> 应用 SUSFS 补丁..."
 patch -p1 --ignore-whitespace --fuzz=3 < susfs.patch
 
 
-# ==================== [Step 4: SukiSU 源码适配] ====================
+# ==================== [Step 4: SukiSU 源码适配 (修复版)] ====================
 echo "💉 [4/6] 执行 SukiSU 源码适配..."
 
 # 1. 生成 Makefile
 rm -f drivers/kernelsu/Kbuild
-# 添加 -DKSU_COMPAT_HAS_CURRENT_SID 防止重复定义
 cat > drivers/kernelsu/Makefile <<'EOF'
 ccflags-y += -DKSU_VERSION=11999 -DKSU_VERSION_FULL=\"v1.0.0-SUKISU-Custom\"
 ccflags-y += -Wno-implicit-function-declaration -Wno-strict-prototypes -Wno-int-to-pointer-cast -Wno-unused-function -Wno-unused-variable -Wno-missing-braces -Wno-declaration-after-statement
@@ -172,10 +157,20 @@ obj-$(CONFIG_KSU_MANUAL_SU) += manual_su.o
 obj-$(CONFIG_KPM) += kpm/
 EOF
 
-# 2. [🔥 重点修复] 修复 selinux_enforcing 未声明错误
+# 2. [修复] 补充 policydb 和 selinux_state 声明
+# 修复 drivers/kernelsu/selinux/rules.c 中的 "undeclared identifier"
+sed -i '1i\
+extern struct policydb policydb;\
+extern struct selinux_state selinux_state;' drivers/kernelsu/selinux/rules.c
+
+# 3. [修复] 修正 selinux_status_update_policyload 参数调用
+# 将 selinux_status_update_policyload(0) 改为 selinux_status_update_policyload(&selinux_state, 0)
+sed -i 's/selinux_status_update_policyload(0);/selinux_status_update_policyload(\&selinux_state, 0);/g' drivers/kernelsu/selinux/rules.c
+
+# 4. 修复 selinux_enforcing 未声明错误
 sed -i '1i\extern int selinux_enforcing;' drivers/kernelsu/selinux/selinux_defs.h
 
-# 3. [🔥 重点修复] 仅替换 current_sid，不替换 policydb
+# 5. 仅替换 current_sid，不替换 policydb
 sed -i 's/static inline u32 current_sid(void)/static inline u32 __ksu_ignored_current_sid(void)/' drivers/kernelsu/selinux/selinux_defs.h
 
 # ==================== [Step 5: MIUI DTS & Config] ====================
