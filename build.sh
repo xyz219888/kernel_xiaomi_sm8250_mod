@@ -25,74 +25,41 @@ MAKE_ARGS="ARCH=arm64 SUBARCH=arm64 O=out \
 
 echo -e "\033[0;32m=== 🚀 开始编译 (适配 SM8250 + SukiSU Final) ===\033[0m"
 
-# ==================== [Step 1: 优先级最高 - 源码净化] ====================
-echo "🧹 [1/6] 执行全谱系源码净化 (基于文件深度扫描)..."
+# ==================== [Step 1: 优先级最高 - 绝对净化] ====================
+echo "🧹 [1/6] 执行绝对净化..."
 
-# 1. [保留] 基础环境重置
-# 先运行您的清理补丁，虽然它不完美，但能处理大部分文件
+# 1. 基础重置 (忽略补丁错误，强制继续)
 curl -L https://github.com/ApartTUSITU/kernel_xiaomi_sm8250_mod/commit/a05557c.patch | git apply -v >/dev/null 2>&1 || true
 rm -rf drivers/kernelsu drivers/susfs fs/susfs out/
 mkdir -p out
 
-# 2. [关键] 重置核心源码文件
-# 确保文件存在，且尽可能恢复到 git 记录的状态
-git checkout fs/exec.c fs/open.c fs/stat.c fs/read_write.c drivers/input/input.c 2>/dev/null || true
+# 2. 强制重置核心文件到 Git 初始状态
+git checkout fs/exec.c fs/open.c fs/stat.c fs/read_write.c drivers/input/input.c include/linux/sched.h 2>/dev/null || true
 
-# 3. [核弹级清洗] 针对 5 个核心文件的精准手术
-echo "   -> 正在执行一丝不苟的清理..."
+# 3. [核弹级清洗] 针对源码中顽固残留的清洗
+echo "   -> 正在清除顽固残留..."
 
-# ---------------------------------------------------------
-# [A] 清理 fs/read_write.c (彻底解决 conflicting types 和 non-void 报错)
-# ---------------------------------------------------------
-# 1. 删除旧的 extern 声明块 (包括多行参数)
+# [fs/read_write.c] 彻底清除旧逻辑
 sed -i '/extern bool ksu_vfs_read_hook/d' fs/read_write.c
 sed -i '/extern int ksu_handle_sys_read/,/size_t \*count_ptr);/d' fs/read_write.c
-# 2. 删除 SYSCALL_DEFINE3(read) 内部的逻辑 (包括 if 判断)
-# 这一步非常关键：删除从 if 开始到函数调用结束的行
 sed -i '/if (unlikely(ksu_vfs_read_hook))/,/ksu_handle_sys_read/d' fs/read_write.c
-# 3. 再次扫尾，防止单行残留
-sed -i '/ksu_handle_sys_read/d' fs/read_write.c
 sed -i '/ksu_vfs_read_hook/d' fs/read_write.c
+sed -i '/ksu_handle_sys_read/d' fs/read_write.c
 
-# ---------------------------------------------------------
-# [B] 清理 fs/open.c (彻底解决 extraneous ')' 报错)
-# ---------------------------------------------------------
-# 1. 删除 faccessat 的声明 (包括可能断行的参数)
+# [fs/open.c] 清除断行残留
 sed -i '/extern int ksu_handle_faccessat/d' fs/open.c
 sed -i '/int \*flags);/d' fs/open.c
 sed -i '/int \*mode, int \*flags);/d' fs/open.c
-sed -i '/const char __user \*\*filename_user/d' fs/open.c
-# 2. 删除调用点
 sed -i '/ksu_handle_faccessat/d' fs/open.c
-sed -i '/int ks_flags = 0;/d' fs/open.c
 
-# ---------------------------------------------------------
-# [C] 清理 fs/exec.c
-# ---------------------------------------------------------
-sed -i '/extern int ksu_handle_execveat/d' fs/exec.c
-sed -i '/ksu_handle_execveat/d' fs/exec.c
-
-# ---------------------------------------------------------
-# [D] 清理 fs/stat.c
-# ---------------------------------------------------------
-sed -i '/extern int ksu_handle_stat/d' fs/stat.c
+# [fs/stat.c] 清除错误注入
 sed -i '/ksu_handle_stat/d' fs/stat.c
-sed -i '/extern void ksu_handle_vfs_fstat/d' fs/stat.c
 sed -i '/ksu_handle_vfs_fstat/d' fs/stat.c
 
-# ---------------------------------------------------------
-# [E] 清理 drivers/input/input.c
-# ---------------------------------------------------------
-sed -i '/extern int ksu_handle_input_handle_event/d' drivers/input/input.c
-sed -i '/ksu_handle_input_handle_event/d' drivers/input/input.c
+# [通用] 清除所有 KSU 痕迹
+sed -i '/ksu_handle/d' fs/exec.c fs/open.c fs/stat.c drivers/input/input.c
 
-# ---------------------------------------------------------
-# [F] 全局通用清理 (防止漏网之鱼)
-# ---------------------------------------------------------
-# 删除任何包含 ksu_handle 的遗留行
-sed -i '/ksu_handle/d' fs/exec.c fs/open.c fs/stat.c fs/read_write.c drivers/input/input.c
-
-echo "   ✅ 源码净化完成！所有残留已被根除。"
+echo "   ✅ 净化完成！"
 
 # ==================== [Step 2: 下载组件] ====================
 echo "⬇️ [2/6] 下载 SukiSU & SUSFS..."
@@ -101,55 +68,81 @@ wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainl
 
 
 # ==================== [Step 3: 补丁与 Hook 注入] ====================
-echo "🔧 [3/6] 执行代码注入 (SukiSU Final)..."
+echo "🔧 [3/6] 执行智能代码注入..."
 
 # 1. 应用 SUSFS 补丁
-echo "   -> 正在应用 SUSFS 补丁..."
 if [ -f "susfs.patch" ]; then
-    patch -p1 --ignore-whitespace --fuzz=3 < susfs.patch || echo "⚠️ SUSFS补丁可能已应用，尝试继续..."
-else
-    echo "⚠️ 未找到 susfs.patch，跳过..."
+    patch -p1 --ignore-whitespace --fuzz=3 < susfs.patch || echo "⚠️ Patch已应用或有冲突，尝试手动修复关键头文件..."
+fi
+
+# 2. [关键修复] 手动修复 include/linux/sched.h (解决 no member named 报错)
+# 如果 SUSFS 补丁没打上，这里手动补上 task_struct 的定义
+if ! grep -q "susfs_task_state" include/linux/sched.h; then
+    echo "   -> 正在修复 sched.h (补全 susfs_task_state)..."
+    sed -i '/^	\/\* protection of the PI data mutex \*\//i \
+	#ifdef CONFIG_KSU\
+	u32 susfs_task_state;\
+	#endif' include/linux/sched.h
 fi
 
 echo "   -> 正在执行 SukiSU Manual Hook..."
 
-# --- 1. fs/exec.c ---
-# 声明
-sed -i '1i\#ifdef CONFIG_KSU\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n#endif' fs/exec.c
-# 注入: 匹配 do_execveat (基于您提供的 exec.c 文件内容)
-sed -i '/return do_execveat/i \#ifdef CONFIG_KSU\nksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n#endif' fs/exec.c
+# --- 1. fs/read_write.c ---
+# 声明：放在最后一个 include 后面 (解决 unknown type)
+sed -i '/#include <asm\/unistd.h>/a \
+#ifdef CONFIG_KSU\
+extern void ksu_handle_sys_read(unsigned int fd);\
+#endif' fs/read_write.c
+# 注入：只在 read 系统调用内部
+sed -i '/^SYSCALL_DEFINE3(read,/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU\nksu_handle_sys_read(fd);\n#endif/' fs/read_write.c
 
 # --- 2. fs/open.c ---
 # 声明
-sed -i '1i\#ifdef CONFIG_KSU\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n#endif' fs/open.c
-# 注入: do_faccessat (基于 open.c 内容)
+sed -i '/#include <asm\/unistd.h>/a \
+#ifdef CONFIG_KSU\
+extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\
+#endif' fs/open.c
+# 注入
 sed -i '/return do_faccessat(dfd,/i \#ifdef CONFIG_KSU\n{ int ks_flags = 0; ksu_handle_faccessat(&dfd, &filename, &mode, &ks_flags); }\n#endif' fs/open.c
-# 注入: access 系统调用
 sed -i '/return do_faccessat(AT_FDCWD,/i \#ifdef CONFIG_KSU\n{ int dfd = AT_FDCWD; int ks_flags = 0; ksu_handle_faccessat(&dfd, &filename, &mode, &ks_flags); }\n#endif' fs/open.c
 
-# --- 3. fs/stat.c ---
+# --- 3. fs/exec.c ---
 # 声明
-sed -i '1i\#ifdef CONFIG_KSU\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\nextern void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr);\n#endif' fs/stat.c
-# 注入: vfs_fstatat
-sed -i '/error = vfs_fstatat/i \#ifdef CONFIG_KSU\nksu_handle_stat(&dfd, &filename, &flag);\n#endif' fs/stat.c
-# 注入: vfs_fstat (SUSFS 特需)
-sed -i '/return error;/i \#ifdef CONFIG_KSU\nif (!error) ksu_handle_vfs_fstat(fd, &stat->size);\n#endif' fs/stat.c
+sed -i '/#include <asm\/unistd.h>/a \
+#ifdef CONFIG_KSU\
+extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\
+#endif' fs/exec.c
+# 注入
+sed -i '/return do_execveat/i \#ifdef CONFIG_KSU\nksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n#endif' fs/exec.c
+sed -i '/return __do_execve_file/i \#ifdef CONFIG_KSU\nksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n#endif' fs/exec.c
 
-# --- 4. fs/read_write.c (修复 read 报错) ---
-# [关键] 声明 void, 单参数 (匹配 SukiSU 定义)
-sed -i '1i\#ifdef CONFIG_KSU\nextern void ksu_handle_sys_read(unsigned int fd);\n#endif' fs/read_write.c
-# 注入: 定位到 SYSCALL_DEFINE3(read, ...)
-# 使用正则定位到函数体开始的 "{" 后注入，确保不会破坏其他逻辑
-sed -i '/^SYSCALL_DEFINE3(read,/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU\nksu_handle_sys_read(fd);\n#endif/' fs/read_write.c
+# --- 4. fs/stat.c (彻底修复 fd 报错) ---
+# 声明：放在 include 后面
+sed -i '/#include <asm\/unistd.h>/a \
+#ifdef CONFIG_KSU\
+extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\
+extern void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr);\
+#endif' fs/stat.c
+
+# 注入 1: vfs_fstatat (不需要 fd)
+sed -i '/error = vfs_fstatat/i \#ifdef CONFIG_KSU\nksu_handle_stat(&dfd, &filename, &flag);\n#endif' fs/stat.c
+
+# 注入 2: vfs_fstat (只有这里有 fd!)
+# 我们不匹配 "return error"，而是匹配 vfs_fstat 特有的行
+# 这里的逻辑是：在 "fdput(f);" 之前插入 Hook，因为那时 fd 还有效
+sed -i '/fdput(f);/i \
+#ifdef CONFIG_KSU\
+if (!error) ksu_handle_vfs_fstat(fd, &stat->size);\
+#endif' fs/stat.c
 
 # --- 5. drivers/input/input.c ---
-# 声明
-sed -i '1i\#ifdef CONFIG_KSU\nextern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\n#endif' drivers/input/input.c
-# 注入
+sed -i '/#include <linux\/input\/mt.h>/a \
+#ifdef CONFIG_KSU\
+extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\
+#endif' drivers/input/input.c
 sed -i '/if (disposition & INPUT_IGNORE_EVENT)/i \#ifdef CONFIG_KSU\nksu_handle_input_handle_event(&type, &code, &value);\n#endif' drivers/input/input.c
 
-echo "   ✅ SukiSU Hook 代码注入完成！"
-
+echo "   ✅ 注入完成！"
 # ==================== [Step 4: SukiSU 源码适配 (修复版)] ====================
 echo "💉 [4/6] 执行 SukiSU 源码适配..."
 
