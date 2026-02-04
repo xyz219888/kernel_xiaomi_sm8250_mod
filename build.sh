@@ -66,7 +66,7 @@ wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainl
 
 
 # ==================== [Step 3: 补丁与 Hook 注入] ====================
-echo "🔧 [3/6] 执行代码注入 (C89/C90 标准兼容版)..."
+echo "🔧 [3/6] 执行代码注入 (Final Perfect Version)..."
 
 # 1. 应用 SUSFS 补丁
 if [ -f "susfs.patch" ]; then
@@ -74,8 +74,9 @@ if [ -f "susfs.patch" ]; then
     patch -p1 --ignore-whitespace --fuzz=3 < susfs.patch || echo "⚠️ Patch 可能有冲突，使用脚本强制修复..."
 fi
 
-# 2. 补全头文件定义
+# 2. 强制补全头文件 (防止 undeclared identifier)
 echo "   -> 正在补全头文件定义..."
+# 修复 sched.h
 if ! grep -q "susfs_task_state" include/linux/sched.h; then
     sed -i '/^	\/\* protection of the PI data mutex \*\//i \
 	#ifdef CONFIG_KSU\
@@ -88,6 +89,7 @@ if ! grep -q "TASK_STRUCT_NON_ROOT_USER_APP_PROC" include/linux/sched.h; then
 #define TASK_STRUCT_NON_ROOT_USER_APP_PROC (1)\
 #endif' include/linux/sched.h
 fi
+# 修复 fs.h
 if ! grep -q "INODE_STATE_SUS_KSTAT" include/linux/fs.h; then
     sed -i '$a \
 #ifndef INODE_STATE_SUS_KSTAT\
@@ -95,24 +97,27 @@ if ! grep -q "INODE_STATE_SUS_KSTAT" include/linux/fs.h; then
 #endif' include/linux/fs.h
 fi
 
-echo "   -> 正在执行 SukiSU Manual Hook (精准位置)..."
+echo "   -> 正在执行 SukiSU Manual Hook (精准注入)..."
 
 # --- 1. fs/read_write.c ---
-# 这个文件没有局部变量声明，插在开头是安全的
+# 锚点: linux/fs.h
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU\
 extern bool ksu_vfs_read_hook __read_mostly;\
 extern int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr);\
 #endif' fs/read_write.c
+# 注入: 直接插在函数体开头 (宏定义展开后通常可以接受)
 sed -i '/^SYSCALL_DEFINE3(read,/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU\nif (unlikely(ksu_vfs_read_hook)) ksu_handle_sys_read(fd, \&buf, \&count);\n#endif/' fs/read_write.c
 
 
 # --- 2. fs/exec.c ---
-# 插入点：跳过变量声明，在 "if (IS_ERR(filename))" 之前插入
-sed -i '/#include <linux\/fs.h>/a \
+# 锚点: linux/file.h (原 fs.h 不存在，改用 file.h)
+sed -i '/#include <linux\/file.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\
 #endif' fs/exec.c
+# 注入: __do_execve_file (静态函数)
+# 位置: 插在 "if (IS_ERR(filename))" 之前，确保在变量声明之后
 sed -i '/if (IS_ERR(filename))/i \
 #ifdef CONFIG_KSU\
 ksu_handle_execveat(\&fd, \&filename, \&argv, \&envp, \&flags);\
@@ -120,44 +125,50 @@ ksu_handle_execveat(\&fd, \&filename, \&argv, \&envp, \&flags);\
 
 
 # --- 3. fs/open.c ---
-# 插入点：在 "if (mode & ~S_IRWXO)" 之前
-# 注意：这里插入了变量声明 int ks_flags，紧接着代码，符合 C90 规范
+# 锚点: linux/fs.h
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\
 #endif' fs/open.c
+# 注入: do_faccessat
+# 位置: 插在 "if (mode & ~S_IRWXO)" 之前，确保在变量声明之后
+# 技巧: 使用 {} 代码块包裹，避免声明变量影响 C90 标准
 sed -i '/if (mode & ~S_IRWXO)/i \
 #ifdef CONFIG_KSU\
-int ks_flags = 0; ksu_handle_faccessat(\&dfd, \&filename, \&mode, \&ks_flags);\
-#endif' fs/open.c
+{ int ks_flags = 0; ksu_handle_faccessat(\&dfd, \&filename, \&mode, \&ks_flags); }\n#endif' fs/open.c
 
 
 # --- 4. fs/stat.c ---
+# 锚点: linux/fs.h
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\
 extern void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr);\
 #endif' fs/stat.c
 
-# 注入 vfs_statx: 在 check flags 之前
+# 注入 1: vfs_statx
+# 位置: 插在检查 flags 之前
 sed -i '/if ((flags & ~(AT_SYMLINK_NOFOLLOW/i \
 #ifdef CONFIG_KSU\
 ksu_handle_stat(\&dfd, \&filename, \&flags);\
 #endif' fs/stat.c
 
-# 注入 vfs_statx_fd: 在 check flags 之前
-sed -i '/if (query_flags & ~KSTAT_QUERY_FLAGS)/i \
+# 注入 2: vfs_statx_fd (SUSFS 核心)
+# 位置: 插在 fdput(f) 之前，此时 fd 和 stat 都有效
+sed -i '/fdput(f);/i \
 #ifdef CONFIG_KSU\
 if (!error) ksu_handle_vfs_fstat(fd, \&stat->size);\
 #endif' fs/stat.c
 
 
 # --- 5. drivers/input/input.c ---
-# 改为 Hook input_event，插在 "if (is_event_supported" 之前
-sed -i '/#include <linux\/input.h>/a \
+# 锚点: linux/input/mt.h (原 input.h 不存在，改用 mt.h)
+sed -i '/#include <linux\/input\/mt.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\
 #endif' drivers/input/input.c
+# 注入: input_event
+# 位置: 插在 "if (is_event_supported" 之前
 sed -i '/if (is_event_supported(type, dev->evbit, EV_MAX))/i \
 #ifdef CONFIG_KSU\
 ksu_handle_input_handle_event(\&type, \&code, \&value);\
@@ -165,18 +176,20 @@ ksu_handle_input_handle_event(\&type, \&code, \&value);\
 
 
 # --- 6. kernel/reboot.c ---
-# 插入点：在 "if (check_poweroff_charger_mode())" 之前
-# 这样保证了 struct declaration 在前，Hook 代码在后
+# 锚点: linux/syscalls.h
 sed -i '/#include <linux\/syscalls.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\
 #endif' kernel/reboot.c
+# 注入: SYSCALL_DEFINE4(reboot)
+# 位置: 插在 "if (check_poweroff_charger_mode())" 之前，确保在 int ret = 0; 之后
 sed -i '/if (check_poweroff_charger_mode())/i \
 #ifdef CONFIG_KSU\
 ksu_handle_sys_reboot(magic1, magic2, cmd, \&arg);\
 #endif' kernel/reboot.c
 
-echo "   ✅ 完美适配注入完成！(已修复 declaration-after-statement 报错)"
+echo "   ✅ 完美适配注入完成！(C90标准兼容 + 全量Hook + 隐式声明修复)"
+
 
 # ==================== [Step 4: SukiSU 源码适配 (修复版)] ====================
 echo "💉 [4/6] 执行 SukiSU 源码适配..."
