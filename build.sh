@@ -26,35 +26,38 @@ MAKE_ARGS="ARCH=arm64 SUBARCH=arm64 O=out \
 echo -e "\033[0;32m=== 🚀 开始编译 (适配 SM8250 + SukiSU Final) ===\033[0m"
 
 # ==================== [Step 1: 源码深度净化] ====================
-echo "🧹 [1/6] 执行源码深度净化 (官方源码恢复)..."
+echo "🧹 [1/6] 执行源码深度净化 (使用直链恢复官方版本)..."
 
 # 1. 基础重置
 curl -L https://github.com/ApartTUSITU/kernel_xiaomi_sm8250_mod/commit/a05557c.patch | git apply -v >/dev/null 2>&1 || true
 rm -rf drivers/kernelsu drivers/susfs fs/susfs out/
 mkdir -p out
 
-# 2. [修正] 使用您提供的官方链接下载 5 个核心文件
-echo "   -> 正在从 UtsavBalar1231 仓库恢复核心文件..."
+# 2. [直链下载] 恢复 6 个核心文件 (UtsavBalar1231 官方纯净版)
+echo "   -> 正在恢复核心文件..."
 
 # fs/read_write.c
-curl -s -L "https://raw.githubusercontent.com/UtsavBalar1231/kernel_xiaomi_sm8250/99352d52fed224160798675f138d6af0051a5e5c/fs/read_write.c" -o fs/read_write.c || echo "❌ 下载 read_write.c 失败"
+curl -s -L "https://raw.githubusercontent.com/UtsavBalar1231/kernel_xiaomi_sm8250/99352d52fed224160798675f138d6af0051a5e5c/fs/read_write.c" -o fs/read_write.c || echo "❌ read_write.c 下载失败"
 
 # fs/exec.c
-curl -s -L "https://raw.githubusercontent.com/UtsavBalar1231/kernel_xiaomi_sm8250/99352d52fed224160798675f138d6af0051a5e5c/fs/exec.c" -o fs/exec.c || echo "❌ 下载 exec.c 失败"
+curl -s -L "https://raw.githubusercontent.com/UtsavBalar1231/kernel_xiaomi_sm8250/99352d52fed224160798675f138d6af0051a5e5c/fs/exec.c" -o fs/exec.c || echo "❌ exec.c 下载失败"
 
 # fs/open.c
-curl -s -L "https://raw.githubusercontent.com/UtsavBalar1231/kernel_xiaomi_sm8250/99352d52fed224160798675f138d6af0051a5e5c/fs/open.c" -o fs/open.c || echo "❌ 下载 open.c 失败"
+curl -s -L "https://raw.githubusercontent.com/UtsavBalar1231/kernel_xiaomi_sm8250/99352d52fed224160798675f138d6af0051a5e5c/fs/open.c" -o fs/open.c || echo "❌ open.c 下载失败"
 
 # fs/stat.c
-curl -s -L "https://raw.githubusercontent.com/UtsavBalar1231/kernel_xiaomi_sm8250/99352d52fed224160798675f138d6af0051a5e5c/fs/stat.c" -o fs/stat.c || echo "❌ 下载 stat.c 失败"
+curl -s -L "https://raw.githubusercontent.com/UtsavBalar1231/kernel_xiaomi_sm8250/99352d52fed224160798675f138d6af0051a5e5c/fs/stat.c" -o fs/stat.c || echo "❌ stat.c 下载失败"
 
 # drivers/input/input.c
-curl -s -L "https://raw.githubusercontent.com/UtsavBalar1231/kernel_xiaomi_sm8250/99352d52fed224160798675f138d6af0051a5e5c/drivers/input/input.c" -o drivers/input/input.c || echo "❌ 下载 input.c 失败"
+curl -s -L "https://raw.githubusercontent.com/UtsavBalar1231/kernel_xiaomi_sm8250/99352d52fed224160798675f138d6af0051a5e5c/drivers/input/input.c" -o drivers/input/input.c || echo "❌ input.c 下载失败"
 
-# 3. 顺手还原头文件 (防止之前改坏了)
+# kernel/reboot.c (新增)
+curl -s -L "https://raw.githubusercontent.com/UtsavBalar1231/kernel_xiaomi_sm8250/99352d52fed224160798675f138d6af0051a5e5c/kernel/reboot.c" -o kernel/reboot.c || echo "❌ reboot.c 下载失败"
+
+# 3. 还原头文件 (防止误伤)
 git checkout include/linux/sched.h include/linux/fs.h 2>/dev/null || true
 
-echo "   ✅ 源码已恢复为指定的官方版本！"
+echo "   ✅ 6 个核心文件已恢复为纯净状态！"
 
 # ==================== [Step 2: 下载组件] ====================
 echo "⬇️ [2/6] 下载 SukiSU & SUSFS..."
@@ -63,17 +66,16 @@ wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainl
 
 
 # ==================== [Step 3: 补丁与 Hook 注入] ====================
-echo "🔧 [3/6] 执行代码注入 (适配 UtsavBalar1231)..."
+echo "🔧 [3/6] 执行代码注入 (6 文件完美适配版)..."
 
 # 1. 应用 SUSFS 补丁
 if [ -f "susfs.patch" ]; then
     echo "   -> 应用 SUSFS 补丁..."
-    patch -p1 --ignore-whitespace --fuzz=3 < susfs.patch || echo "⚠️ Patch 可能有冲突，将使用脚本强制修复..."
+    patch -p1 --ignore-whitespace --fuzz=3 < susfs.patch || echo "⚠️ Patch 可能有冲突，使用脚本强制修复..."
 fi
 
-# 2. [关键] 强制补全头文件定义 (解决 undeclared identifier)
+# 2. [关键] 强制补全头文件定义 (防止 undeclared identifier)
 echo "   -> 正在补全头文件定义..."
-
 # (A) include/linux/sched.h
 if ! grep -q "susfs_task_state" include/linux/sched.h; then
     sed -i '/^	\/\* protection of the PI data mutex \*\//i \
@@ -87,7 +89,6 @@ if ! grep -q "TASK_STRUCT_NON_ROOT_USER_APP_PROC" include/linux/sched.h; then
 #define TASK_STRUCT_NON_ROOT_USER_APP_PROC (1)\
 #endif' include/linux/sched.h
 fi
-
 # (B) include/linux/fs.h
 if ! grep -q "INODE_STATE_SUS_KSTAT" include/linux/fs.h; then
     sed -i '$a \
@@ -98,69 +99,67 @@ fi
 
 echo "   -> 正在执行 SukiSU Manual Hook..."
 
-# --- 1. fs/read_write.c ---
-# 声明
+# --- 1. fs/read_write.c (Hook read) ---
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU\
-extern void ksu_handle_sys_read(unsigned int fd);\
+extern bool ksu_vfs_read_hook __read_mostly;\
+extern int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr);\
 #endif' fs/read_write.c
-# 注入: SYSCALL_DEFINE3(read)
-sed -i '/^SYSCALL_DEFINE3(read,/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU\nksu_handle_sys_read(fd);\n#endif/' fs/read_write.c
+# 注入: 加入 unlikely 优化
+sed -i '/^SYSCALL_DEFINE3(read,/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU\nif (unlikely(ksu_vfs_read_hook)) ksu_handle_sys_read(fd, \&buf, \&count);\n#endif/' fs/read_write.c
 
 
-# --- 2. fs/exec.c ---
-# 声明
+# --- 2. fs/exec.c (Hook execve) ---
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\
 #endif' fs/exec.c
-# 注入: do_execveat (入口)
-sed -i '/^int do_execveat(/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU\nksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n#endif/' fs/exec.c
-# 注入: 兼容 __do_execve_file
-sed -i '/^static int __do_execve_file(/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU\nksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n#endif/' fs/exec.c
+# 注入: __do_execve_file (静态函数，覆盖范围更广)
+sed -i '/^static int __do_execve_file(/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU\nksu_handle_execveat(\&fd, \&filename, \&argv, \&envp, \&flags);\n#endif/' fs/exec.c
 
 
-# --- 3. fs/open.c ---
-# 声明
+# --- 3. fs/open.c (Hook open/access) ---
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\
 #endif' fs/open.c
-# 注入: do_faccessat
-sed -i '/long do_faccessat(/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU\nint ks_flags = 0; ksu_handle_faccessat(&dfd, &filename, &mode, &ks_flags);\n#endif/' fs/open.c
+# 注入: do_faccessat (手动补充 ks_flags)
+sed -i '/^long do_faccessat(/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU\nint ks_flags = 0; ksu_handle_faccessat(\&dfd, \&filename, \&mode, \&ks_flags);\n#endif/' fs/open.c
 
 
-# --- 4. fs/stat.c (🔥 重点适配) ---
-# 声明
+# --- 4. fs/stat.c (Hook stat) ---
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\
 extern void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr);\
 #endif' fs/stat.c
-
-# 注入 1: vfs_statx (替代 vfs_fstatat)
-# 您的源码中 vfs_statx 负责处理路径相关的 stat
-sed -i '/int vfs_statx(/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU\nksu_handle_stat(&dfd, &filename, &flags);\n#endif/' fs/stat.c
-
-# 注入 2: vfs_statx_fd (替代 vfs_fstat)
-# 您的源码中没有 vfs_fstat 定义，而是用 vfs_statx_fd 处理 fd 相关的 stat
-# 我们在 fdput(f) 之前插入，因为此时 struct fd f 还是有效的
+# 注入 1: vfs_statx (路径类)
+sed -i '/^int vfs_statx(/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU\nksu_handle_stat(\&dfd, \&filename, \&flags);\n#endif/' fs/stat.c
+# 注入 2: vfs_statx_fd (fd 类 - SUSFS核心)
 sed -i '/fdput(f);/i \
 #ifdef CONFIG_KSU\
-if (!error) ksu_handle_vfs_fstat(fd, &stat->size);\
+if (!error) ksu_handle_vfs_fstat(fd, \&stat->size);\
 #endif' fs/stat.c
 
 
-# --- 5. drivers/input/input.c ---
-# 声明
+# --- 5. drivers/input/input.c (Safe Mode) ---
 sed -i '/#include <linux\/input.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\
 #endif' drivers/input/input.c
-# 注入: input_handle_event (void类型)
-sed -i '/static void input_handle_event(/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU\nksu_handle_input_handle_event(&type, &code, &value);\n#endif/' drivers/input/input.c
+# 注入: input_handle_event
+sed -i '/^static void input_handle_event(/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU\nksu_handle_input_handle_event(\&type, \&code, \&value);\n#endif/' drivers/input/input.c
 
-echo "   ✅ 完美适配注入完成！"
+
+# --- 6. kernel/reboot.c (Reboot Hook - 新增) ---
+sed -i '/#include <linux\/syscalls.h>/a \
+#ifdef CONFIG_KSU\
+extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\
+#endif' kernel/reboot.c
+# 注入: SYSCALL_DEFINE4(reboot)
+sed -i '/^SYSCALL_DEFINE4(reboot,/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU\nksu_handle_sys_reboot(magic1, magic2, cmd, \&arg);\n#endif/' kernel/reboot.c
+
+echo "   ✅ 完美适配注入完成！(已包含 Reboot Hook)"
 
 # ==================== [Step 4: SukiSU 源码适配 (修复版)] ====================
 echo "💉 [4/6] 执行 SukiSU 源码适配..."
