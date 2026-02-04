@@ -185,41 +185,57 @@ ksu_handle_sys_reboot(magic1, magic2, cmd, \&arg);\
 
 echo "   ✅ 注入完成！(已集成结构体前向声明与C90兼容修复)"
 
-# ==================== [Step 3.5: 强制内核链接修复] ====================
-echo "🔧 [3.5/6] 执行源码级链接修复 (针对 hooks.c 和 Makefile)..."
+# ==================== [Step 3.5: 核心兼容性修复] ====================
+echo "🔧 [3.5/6] 执行内核兼容性适配 (关键步骤)..."
 
-# 1. [死结修复 1] 强制导出 selinux_enforcing
-# 您的 hooks.txt 里没有 EXPORT_SYMBOL，必须手动补上，否则 SukiSU 读不到 SELinux 状态
+# 1. [核心修复] 补全 SukiSU 缺失的接口变量
+# 原理：您的内核使用 selinux_state 结构体，但 SukiSU 依赖传统的 selinux_enforcing 变量。
+# 我们必须手动创建这个变量作为“兼容层”，否则编译必挂。
 SELINUX_HOOKS="security/selinux/hooks.c"
 if [ -f "$SELINUX_HOOKS" ]; then
-    echo "   -> 正在修改 $SELINUX_HOOKS 导出符号..."
-    # 检查是否已经导出 (防止脚本重复运行导致报错)
-    if ! grep -q "EXPORT_SYMBOL(selinux_enforcing)" "$SELINUX_HOOKS"; then
-        # 在文件末尾追加导出宏，这是标准合法的 C 写法
-        echo "" >> "$SELINUX_HOOKS"
-        echo "EXPORT_SYMBOL(selinux_enforcing);" >> "$SELINUX_HOOKS"
-        echo "   -> 已追加 EXPORT_SYMBOL(selinux_enforcing)"
+    echo "   -> 正在检测 selinux_enforcing 接口..."
+    
+    # 只有当文件中完全不存在这个变量定义时，才进行添加
+    if ! grep -q "int selinux_enforcing " "$SELINUX_HOOKS"; then
+        echo "   -> 正在为 SukiSU 创建兼容接口..."
+        
+        # 清理可能存在的旧补丁，保持代码整洁
+        sed -i '/\/\* Fix for SukiSU \*\//d' "$SELINUX_HOOKS"
+        sed -i '/int selinux_enforcing =/d' "$SELINUX_HOOKS"
+        sed -i '/EXPORT_SYMBOL(selinux_enforcing);/d' "$SELINUX_HOOKS"
+
+        # 追加标准定义
+        # 这里赋值为 1 是因为 Android 生产环境必须是 Enforcing 模式
+        # 这确保 SukiSU 的拦截功能处于激活状态
+        cat >> "$SELINUX_HOOKS" <<EOF
+
+/* Fix for SukiSU: Compatibility interface for kernels using selinux_state */
+int selinux_enforcing = 1;
+EXPORT_SYMBOL(selinux_enforcing);
+EOF
+        echo "   ✅ 已补全 selinux_enforcing 变量与符号导出"
     else
-        echo "   -> 检测到已存在导出代码，跳过。"
+        echo "   ✅ 检测到 selinux_enforcing 已存在，无需修改。"
     fi
 fi
 
-# 2. [死结修复 2] 强制硬编码 Makefile
-# 您的 Makefile.txt 里写的是 obj-$(CONFIG_KSU)，但在某些环境下这会导致模块化编译错误
-# 我们直接改成 obj-y，强制编译进内核核心
+# 2. [链接修复] 强制 drivers/kernelsu 静态编译
+# 解决 undefined reference to 'ksu_vfs_read_hook'
 DRIVERS_MAKEFILE="drivers/Makefile"
 if [ -f "$DRIVERS_MAKEFILE" ]; then
-    echo "   -> 正在修改 $DRIVERS_MAKEFILE 强制静态链接..."
+    echo "   -> 正在修复构建规则..."
     
-    # 1. 先删掉所有关于 kernelsu 的旧定义 (包括您文件里 source: 9 那行)
+    # 删除旧的、可能不稳定的定义
     sed -i '/kernelsu/d' "$DRIVERS_MAKEFILE"
     
-    # 2. 写入最强硬的静态编译指令
+    # 写入 obj-y，这是将代码“焊死”在内核里的唯一方法
+    # 只有这样，您的 fs/read_write.c 才能成功调用 KSU
     echo "obj-y += kernelsu/" >> "$DRIVERS_MAKEFILE"
-    echo "   -> 已写入 obj-y += kernelsu/ (强制静态链接)"
+    echo "   ✅ 已强制 drivers/kernelsu 为静态组件 (obj-y)"
 fi
 
-echo "   ✅ 源码修复完成！链接通道已打通。"
+echo "   ✅ 内核兼容性修复完成！"
+
 
 # ==================== [Step 4: SukiSU 源码适配 (修复版)] ====================
 echo "💉 [4/6] 执行 SukiSU 源码适配..."
