@@ -64,64 +64,80 @@ curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kern
 wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch -q
 
 
-# ==================== [Step 3: 代码注入 (Stable)] ====================
-echo "🔧 [3/6] 执行稳定版代码注入..."
+# ==================== [Step 3: 补丁与 Hook 注入] ====================
+echo "🔧 [3/6] 执行补丁修复与注入..."
 
 # 1. 应用 SUSFS 补丁
 if [ -f "susfs.patch" ]; then
     patch -p1 --ignore-whitespace --fuzz=3 < susfs.patch || echo "⚠️ Patch可能已应用，继续..."
 fi
 
-# 2. 修复 sched.h (如果补丁失败)
-# 确保 susfs_task_state 存在，否则 stat.c 会报错
+# 2. [🔥核心修复] 强制补全缺失的头文件定义 (解决 undeclared identifier)
+echo "   -> 正在修复头文件缺失..."
+
+# (A) 修复 include/linux/sched.h
+# 补全 susfs_task_state 变量和 TASK_STRUCT_NON_ROOT_USER_APP_PROC 宏
 if ! grep -q "susfs_task_state" include/linux/sched.h; then
     sed -i '/^	\/\* protection of the PI data mutex \*\//i \
 	#ifdef CONFIG_KSU\
 	u32 susfs_task_state;\
 	#endif' include/linux/sched.h
 fi
+if ! grep -q "TASK_STRUCT_NON_ROOT_USER_APP_PROC" include/linux/sched.h; then
+    sed -i '/^#endif \/\* _LINUX_SCHED_H \*\//i \
+#ifndef TASK_STRUCT_NON_ROOT_USER_APP_PROC\
+#define TASK_STRUCT_NON_ROOT_USER_APP_PROC (1)\
+#endif' include/linux/sched.h
+fi
+
+# (B) 修复 include/linux/fs.h
+# 补全 INODE_STATE_SUS_KSTAT 宏 (分配一个安全的闲置位 1<<30)
+if ! grep -q "INODE_STATE_SUS_KSTAT" include/linux/fs.h; then
+    sed -i '/^#endif \/\* _LINUX_FS_H \*\//i \
+#ifndef INODE_STATE_SUS_KSTAT\
+#define INODE_STATE_SUS_KSTAT (1UL << 30)\
+#endif' include/linux/fs.h
+fi
+
 
 echo "   -> 正在执行 SukiSU Manual Hook..."
 
-# --- 1. fs/read_write.c ---
-# 声明: 插在 linux/fs.h 后，保证类型定义存在
+# --- 1. fs/read_write.c (Hook read) ---
+# 声明: 插在 linux/fs.h 后面
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU\
 extern void ksu_handle_sys_read(unsigned int fd);\
 #endif' fs/read_write.c
 
-# 注入: 这里的正则匹配 read 系统调用的起始大括号
+# 注入: SYSCALL_DEFINE3(read)
 sed -i '/^SYSCALL_DEFINE3(read,/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU\nksu_handle_sys_read(fd);\n#endif/' fs/read_write.c
 
 
-# --- 2. fs/open.c ---
-# 声明: 插在 linux/fs.h 后 (之前报错 implicit declaration 就是因为没插进去)
+# --- 2. fs/open.c (Hook open/access) ---
+# 声明
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\
 #endif' fs/open.c
 
-# 注入 1: do_faccessat (核心函数)
+# 注入
 sed -i '/return do_faccessat(dfd,/i \#ifdef CONFIG_KSU\n{ int ks_flags = 0; ksu_handle_faccessat(&dfd, &filename, &mode, &ks_flags); }\n#endif' fs/open.c
-
-# 注入 2: access 系统调用 (兼容)
 sed -i '/return do_faccessat(AT_FDCWD,/i \#ifdef CONFIG_KSU\n{ int dfd = AT_FDCWD; int ks_flags = 0; ksu_handle_faccessat(&dfd, &filename, &mode, &ks_flags); }\n#endif' fs/open.c
 
 
-# --- 3. fs/exec.c ---
+# --- 3. fs/exec.c (Hook exec) ---
 # 声明
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\
 #endif' fs/exec.c
 
-# 注入: 匹配 do_execveat_common 或 do_execveat
-# 您的源码中可能是 do_execveat，我们两个都尝试匹配一下，sed 没匹配到不会报错
+# 注入
 sed -i '/return do_execveat/i \#ifdef CONFIG_KSU\nksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n#endif' fs/exec.c
 sed -i '/return __do_execve_file/i \#ifdef CONFIG_KSU\nksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n#endif' fs/exec.c
 
 
-# --- 4. fs/stat.c (精准修复版) ---
+# --- 4. fs/stat.c (Hook stat) ---
 # 声明
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU\
@@ -129,19 +145,19 @@ extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *fla
 extern void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr);\
 #endif' fs/stat.c
 
-# 注入 1: vfs_fstatat (使用的是 dfd 和 filename，不要用 fd!)
+# 注入 1: vfs_fstatat (路径类)
 sed -i '/error = vfs_fstatat/i \#ifdef CONFIG_KSU\nksu_handle_stat(&dfd, &filename, &flag);\n#endif' fs/stat.c
 
-# 注入 2: vfs_fstat (使用的是 fd)
-# [关键] 必须插在 vfs_fstat 函数内部。我们找 "fdput(f)" 作为锚点，这在 vfs_fstat 里是独有的。
+# 注入 2: vfs_fstat (fd 类)
+# 使用 fdput(f) 作为锚点，确保 fd 有效
 sed -i '/fdput(f);/i \
 #ifdef CONFIG_KSU\
 if (!error) ksu_handle_vfs_fstat(fd, &stat->size);\
 #endif' fs/stat.c
 
 
-# --- 5. drivers/input/input.c ---
-# 声明: 插在 input.h 后面
+# --- 5. drivers/input/input.c (Safe Mode) ---
+# 声明
 sed -i '/#include <linux\/input.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\
@@ -150,7 +166,7 @@ extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code,
 # 注入
 sed -i '/if (disposition & INPUT_IGNORE_EVENT)/i \#ifdef CONFIG_KSU\nksu_handle_input_handle_event(&type, &code, &value);\n#endif' drivers/input/input.c
 
-echo "   ✅ 注入完成！"
+echo "   ✅ 注入与头文件修复完成！"
 
 # ==================== [Step 4: SukiSU 源码适配 (修复版)] ====================
 echo "💉 [4/6] 执行 SukiSU 源码适配..."
