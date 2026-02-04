@@ -185,6 +185,42 @@ ksu_handle_sys_reboot(magic1, magic2, cmd, \&arg);\
 
 echo "   ✅ 注入完成！(已集成结构体前向声明与C90兼容修复)"
 
+# ==================== [Step 3.5: 强制内核链接修复] ====================
+echo "🔧 [3.5/6] 执行源码级链接修复 (针对 hooks.c 和 Makefile)..."
+
+# 1. [死结修复 1] 强制导出 selinux_enforcing
+# 您的 hooks.txt 里没有 EXPORT_SYMBOL，必须手动补上，否则 SukiSU 读不到 SELinux 状态
+SELINUX_HOOKS="security/selinux/hooks.c"
+if [ -f "$SELINUX_HOOKS" ]; then
+    echo "   -> 正在修改 $SELINUX_HOOKS 导出符号..."
+    # 检查是否已经导出 (防止脚本重复运行导致报错)
+    if ! grep -q "EXPORT_SYMBOL(selinux_enforcing)" "$SELINUX_HOOKS"; then
+        # 在文件末尾追加导出宏，这是标准合法的 C 写法
+        echo "" >> "$SELINUX_HOOKS"
+        echo "EXPORT_SYMBOL(selinux_enforcing);" >> "$SELINUX_HOOKS"
+        echo "   -> 已追加 EXPORT_SYMBOL(selinux_enforcing)"
+    else
+        echo "   -> 检测到已存在导出代码，跳过。"
+    fi
+fi
+
+# 2. [死结修复 2] 强制硬编码 Makefile
+# 您的 Makefile.txt 里写的是 obj-$(CONFIG_KSU)，但在某些环境下这会导致模块化编译错误
+# 我们直接改成 obj-y，强制编译进内核核心
+DRIVERS_MAKEFILE="drivers/Makefile"
+if [ -f "$DRIVERS_MAKEFILE" ]; then
+    echo "   -> 正在修改 $DRIVERS_MAKEFILE 强制静态链接..."
+    
+    # 1. 先删掉所有关于 kernelsu 的旧定义 (包括您文件里 source: 9 那行)
+    sed -i '/kernelsu/d' "$DRIVERS_MAKEFILE"
+    
+    # 2. 写入最强硬的静态编译指令
+    echo "obj-y += kernelsu/" >> "$DRIVERS_MAKEFILE"
+    echo "   -> 已写入 obj-y += kernelsu/ (强制静态链接)"
+fi
+
+echo "   ✅ 源码修复完成！链接通道已打通。"
+
 # ==================== [Step 4: SukiSU 源码适配 (修复版)] ====================
 echo "💉 [4/6] 执行 SukiSU 源码适配..."
 
