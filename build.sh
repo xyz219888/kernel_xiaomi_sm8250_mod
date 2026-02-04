@@ -66,7 +66,7 @@ wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainl
 
 
 # ==================== [Step 3: 补丁与 Hook 注入] ====================
-echo "🔧 [3/6] 执行代码注入 (Final Perfect Version)..."
+echo "🔧 [3/6] 执行代码注入 (Final Stable Version)..."
 
 # 1. 应用 SUSFS 补丁
 if [ -f "susfs.patch" ]; then
@@ -74,9 +74,10 @@ if [ -f "susfs.patch" ]; then
     patch -p1 --ignore-whitespace --fuzz=3 < susfs.patch || echo "⚠️ Patch 可能有冲突，使用脚本强制修复..."
 fi
 
-# 2. 强制补全头文件 (防止 undeclared identifier)
+# 2. [关键] 强制补全头文件定义 (防止 undeclared identifier)
 echo "   -> 正在补全头文件定义..."
-# 修复 sched.h
+
+# (A) include/linux/sched.h
 if ! grep -q "susfs_task_state" include/linux/sched.h; then
     sed -i '/^	\/\* protection of the PI data mutex \*\//i \
 	#ifdef CONFIG_KSU\
@@ -89,7 +90,8 @@ if ! grep -q "TASK_STRUCT_NON_ROOT_USER_APP_PROC" include/linux/sched.h; then
 #define TASK_STRUCT_NON_ROOT_USER_APP_PROC (1)\
 #endif' include/linux/sched.h
 fi
-# 修复 fs.h
+
+# (B) include/linux/fs.h
 if ! grep -q "INODE_STATE_SUS_KSTAT" include/linux/fs.h; then
     sed -i '$a \
 #ifndef INODE_STATE_SUS_KSTAT\
@@ -97,7 +99,7 @@ if ! grep -q "INODE_STATE_SUS_KSTAT" include/linux/fs.h; then
 #endif' include/linux/fs.h
 fi
 
-echo "   -> 正在执行 SukiSU Manual Hook (精准注入)..."
+echo "   -> 正在执行 SukiSU Manual Hook (结构体可见性修复版)..."
 
 # --- 1. fs/read_write.c ---
 # 锚点: linux/fs.h
@@ -106,33 +108,32 @@ sed -i '/#include <linux\/fs.h>/a \
 extern bool ksu_vfs_read_hook __read_mostly;\
 extern int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr);\
 #endif' fs/read_write.c
-# 注入: 直接插在函数体开头 (宏定义展开后通常可以接受)
+# 注入: read 系统调用
 sed -i '/^SYSCALL_DEFINE3(read,/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU\nif (unlikely(ksu_vfs_read_hook)) ksu_handle_sys_read(fd, \&buf, \&count);\n#endif/' fs/read_write.c
 
 
-# --- 2. fs/exec.c ---
-# 锚点: linux/file.h (原 fs.h 不存在，改用 file.h)
+# --- 2. fs/exec.c (🔥 终极修复: 前向声明) ---
+# 锚点: linux/file.h
+# 修复: 增加 "struct filename;"，让编译器提前认识这个结构体
 sed -i '/#include <linux\/file.h>/a \
 #ifdef CONFIG_KSU\
+struct filename;\
 extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\
 #endif' fs/exec.c
-# 注入: __do_execve_file (静态函数)
-# 位置: 插在 "if (IS_ERR(filename))" 之前，确保在变量声明之后
+# 注入: 这里的变量必须转义 \&
 sed -i '/if (IS_ERR(filename))/i \
 #ifdef CONFIG_KSU\
 ksu_handle_execveat(\&fd, \&filename, \&argv, \&envp, \&flags);\
 #endif' fs/exec.c
 
 
-# --- 3. fs/open.c ---
+# --- 3. fs/open.c (🔥 终极修复: 代码块) ---
 # 锚点: linux/fs.h
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\
 #endif' fs/open.c
-# 注入: do_faccessat
-# 位置: 插在 "if (mode & ~S_IRWXO)" 之前，确保在变量声明之后
-# 技巧: 使用 {} 代码块包裹，避免声明变量影响 C90 标准
+# 注入: 使用 { } 包裹，允许在任何地方声明变量，彻底解决 C90 报错
 sed -i '/if (mode & ~S_IRWXO)/i \
 #ifdef CONFIG_KSU\
 { int ks_flags = 0; ksu_handle_faccessat(\&dfd, \&filename, \&mode, \&ks_flags); }\n#endif' fs/open.c
@@ -145,16 +146,12 @@ sed -i '/#include <linux\/fs.h>/a \
 extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\
 extern void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr);\
 #endif' fs/stat.c
-
-# 注入 1: vfs_statx
-# 位置: 插在检查 flags 之前
+# 注入 vfs_statx
 sed -i '/if ((flags & ~(AT_SYMLINK_NOFOLLOW/i \
 #ifdef CONFIG_KSU\
 ksu_handle_stat(\&dfd, \&filename, \&flags);\
 #endif' fs/stat.c
-
-# 注入 2: vfs_statx_fd (SUSFS 核心)
-# 位置: 插在 fdput(f) 之前，此时 fd 和 stat 都有效
+# 注入 vfs_statx_fd
 sed -i '/fdput(f);/i \
 #ifdef CONFIG_KSU\
 if (!error) ksu_handle_vfs_fstat(fd, \&stat->size);\
@@ -162,13 +159,12 @@ if (!error) ksu_handle_vfs_fstat(fd, \&stat->size);\
 
 
 # --- 5. drivers/input/input.c ---
-# 锚点: linux/input/mt.h (原 input.h 不存在，改用 mt.h)
+# 锚点: linux/input/mt.h (UtsavBalar源码中 input.c 包含的是这个)
 sed -i '/#include <linux\/input\/mt.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\
 #endif' drivers/input/input.c
-# 注入: input_event
-# 位置: 插在 "if (is_event_supported" 之前
+# 注入
 sed -i '/if (is_event_supported(type, dev->evbit, EV_MAX))/i \
 #ifdef CONFIG_KSU\
 ksu_handle_input_handle_event(\&type, \&code, \&value);\
@@ -181,15 +177,13 @@ sed -i '/#include <linux\/syscalls.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\
 #endif' kernel/reboot.c
-# 注入: SYSCALL_DEFINE4(reboot)
-# 位置: 插在 "if (check_poweroff_charger_mode())" 之前，确保在 int ret = 0; 之后
+# 注入: 插在变量声明之后 (check_poweroff_charger_mode 调用前)
 sed -i '/if (check_poweroff_charger_mode())/i \
 #ifdef CONFIG_KSU\
 ksu_handle_sys_reboot(magic1, magic2, cmd, \&arg);\
 #endif' kernel/reboot.c
 
-echo "   ✅ 完美适配注入完成！(C90标准兼容 + 全量Hook + 隐式声明修复)"
-
+echo "   ✅ 注入完成！(已集成结构体前向声明与C90兼容修复)"
 
 # ==================== [Step 4: SukiSU 源码适配 (修复版)] ====================
 echo "💉 [4/6] 执行 SukiSU 源码适配..."
