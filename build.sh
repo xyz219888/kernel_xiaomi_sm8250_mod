@@ -128,20 +128,13 @@ echo "⬇️ [2/6] 下载 SukiSU & SUSFS..."
 curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch -q
 
-# ==================== [Step 3: 补丁应用 & 核心 Hook 注入 (Fix Sys.c)] ====================
-echo "🔧 [3/6] 正在应用补丁与注入 Hook (修复 Sys.c 声明报错)..."
+# ==================== [Step 3: 补丁应用 & 核心 Hook 注入 (GitHub Actions 专用版)] ====================
+echo "🔧 [3/6] 正在应用补丁与注入 Hook..."
 
 # --- 1. 应用 SUSFS 补丁 ---
 if [ -f "susfs.patch" ]; then
     echo "   -> 正在应用 susfs.patch..."
-    if patch -p1 --ignore-whitespace --fuzz=3 < susfs.patch; then
-        echo "   ✅ susfs.patch 应用成功！"
-    else
-        echo "   ❌ 错误：susfs.patch 应用失败！请检查 Step 1 是否执行彻底。"
-        exit 1
-    fi
-else
-    echo "   ⚠️ 警告：未找到 susfs.patch！"
+    patch -p1 --ignore-whitespace --fuzz=3 < susfs.patch || { echo "❌ 补丁应用失败"; exit 1; }
 fi
 
 # --- 2. 补全头文件 ---
@@ -161,103 +154,94 @@ fi
 # --- 3. 执行 Hook 注入 ---
 echo "   -> 正在注入 Manual Hook..."
 
-# [1] fs/read_write.c (Hook Read)
+# [1] fs/read_write.c
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU\
 extern bool ksu_init_rc_hook;\
 extern void ksu_handle_sys_read(unsigned int fd);\
 #endif' fs/read_write.c
-
-# 这里的注入位置通常在函数最开头，因为 4.19+ 的 read 函数很简单，没有变量声明，所以不会报错
 sed -i '/^SYSCALL_DEFINE3(read,/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU\nif (unlikely(ksu_init_rc_hook)) ksu_handle_sys_read(fd);\n#endif/' fs/read_write.c
 
-# [2] fs/exec.c (Hook Exec)
+# [2] fs/exec.c (execveat_ksud + &argv)
 sed -i '/#include <linux\/file.h>/a \
 #ifdef CONFIG_KSU\
 struct filename;\
 struct user_arg_ptr;\
 extern int ksu_handle_execveat_ksud(int *fd, struct filename **filename_ptr, struct user_arg_ptr *argv, struct user_arg_ptr *envp, int *flags);\
 #endif' fs/exec.c
-
-# 注入在 if (IS_ERR(filename)) 之前，这已经是声明之后了，安全
 sed -i '/if (IS_ERR(filename))/i \
 #ifdef CONFIG_KSU\
 ksu_handle_execveat_ksud(\&fd, \&filename, \&argv, \&envp, \&flags);\
 #endif' fs/exec.c
 
-# [3] fs/open.c (Hook Open)
+# [3] fs/open.c
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\
 #endif' fs/open.c
-
 sed -i '/if (mode & ~S_IRWXO)/i \
 #ifdef CONFIG_KSU\
 ksu_handle_faccessat(\&dfd, \&filename, \&mode, NULL);\
 #endif' fs/open.c
 
-# [4] fs/stat.c (Hook Stat)
+# [4] fs/stat.c
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\
 extern void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr);\
 #endif' fs/stat.c
-
 sed -i '/if ((flags & ~(AT_SYMLINK_NOFOLLOW/i \
 #ifdef CONFIG_KSU\
 ksu_handle_stat(\&dfd, \&filename, \&flags);\
 #endif' fs/stat.c
-
 sed -i '/fdput(f);/i \
 #ifdef CONFIG_KSU\
 if (!error) ksu_handle_vfs_fstat(fd, \&stat->size);\
 #endif' fs/stat.c
 
-# [5] drivers/input/input.c (Hook Input)
+# [5] drivers/input/input.c
 sed -i '/#include <linux\/input\/mt.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\
 #endif' drivers/input/input.c
-
 sed -i '/if (is_event_supported(type, dev->evbit, EV_MAX))/i \
 #ifdef CONFIG_KSU\
 ksu_handle_input_handle_event(\&type, \&code, \&value);\
 #endif' drivers/input/input.c
 
-# [6] kernel/reboot.c (Hook Reboot)
+# [6] kernel/reboot.c
 sed -i '/#include <linux\/syscalls.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\
 #endif' kernel/reboot.c
-
 sed -i '/if (check_poweroff_charger_mode())/i \
 #ifdef CONFIG_KSU\
 ksu_handle_sys_reboot(magic1, magic2, cmd, \&arg);\
 #endif' kernel/reboot.c
 
-# [7] kernel/sys.c (🔥 关键修复：Setuid Hook)
-# 修正：不再插在函数开头，而是插在变量声明结束之后
+# [7] kernel/sys.c (🔥 终极修正：利用 ksuid 锚点精准定位)
+# 这行代码保证一定是插在 sys_setresuid 里，且在变量声明之后
 if [ -f "kernel/sys.c" ]; then
-    echo "   -> 正在注入 kernel/sys.c (修复位置版)..."
+    echo "   -> 正在注入 kernel/sys.c (精准锚点版)..."
     sed -i '/#include <linux\/syscalls.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);\
 #endif' kernel/sys.c
 
-    # 寻找 'kruid = make_kuid' 这一行，这通常是声明结束后的第一行逻辑
-    # 在它前面插入代码，就绝对安全了
-    sed -i '/kruid = make_kuid(ns, ruid);/i \
+    # 使用 'ksuid = make_kuid' 作为锚点，这是 setresuid 独有的！
+    sed -i '/ksuid = make_kuid(ns, suid);/i \
 #ifdef CONFIG_KSU\
     ksu_handle_setresuid(ruid, euid, suid);\
 #endif' kernel/sys.c
 fi
 
-echo "   ✅ 8核心文件 Hook 注入完成 (已修复 sys.c 编译错误)！"
+echo "   ✅ 8核心文件 Hook 注入完成！"
+
 
 # ==================== [Step 3.5: 变量桥接与链接修复] ====================
 echo "🔧 [3.5/6] 正在执行变量桥接与冲突修复..."
 
-# 1. 强制 Makefile 静态链接 & 开启 Manual Hook 宏
+# 1. 强制静态链接
 DRIVERS_MAKEFILE="drivers/Makefile"
 if [ -f "$DRIVERS_MAKEFILE" ]; then
     sed -i '/kernelsu/d' "$DRIVERS_MAKEFILE"
@@ -265,51 +249,43 @@ if [ -f "$DRIVERS_MAKEFILE" ]; then
     echo "obj-y += kernelsu/" >> "$DRIVERS_MAKEFILE"
 fi
 
-# 2. [Policydb 桥接] (security/selinux/ss/services.c)
+# 2. 桥接 Policydb
 SERVICES_FILE="security/selinux/ss/services.c"
 if [ -f "$SERVICES_FILE" ]; then
-    echo "   -> 桥接 $SERVICES_FILE..."
     if ! grep -q "linux/export.h" "$SERVICES_FILE"; then
         sed -i '/#include <linux\/kernel.h>/a #include <linux/export.h>' "$SERVICES_FILE"
     fi
     if ! grep -q "ksu_policydb_ptr" "$SERVICES_FILE"; then
         cat >> "$SERVICES_FILE" <<EOF
 
-/* Fix for SukiSU: Export policydb via pointer */
 struct policydb *ksu_policydb_ptr = &selinux_ss.policydb;
 EXPORT_SYMBOL(ksu_policydb_ptr);
 EOF
     fi
 fi
 
-# 3. [AVC 桥接] (security/selinux/avc.c)
+# 3. 桥接 AVC
 AVC_FILE="security/selinux/avc.c"
 if [ -f "$AVC_FILE" ]; then
-    echo "   -> 桥接 $AVC_FILE..."
     if ! grep -q "linux/export.h" "$AVC_FILE"; then
         sed -i '/#include <linux\/types.h>/a #include <linux/export.h>' "$AVC_FILE"
     fi
     if ! grep -q "ksu_selinux_avc_ptr" "$AVC_FILE"; then
         cat >> "$AVC_FILE" <<EOF
 
-/* Fix for SukiSU: Export selinux_avc via pointer */
 struct selinux_avc *ksu_selinux_avc_ptr = &selinux_avc;
 EXPORT_SYMBOL(ksu_selinux_avc_ptr);
 EOF
     fi
 fi
 
-# 4. [Hooks 导出] (security/selinux/hooks.c) 🔥
-# 这一步对应第 8 个文件，虽然不注入逻辑，但必须导出变量让 SukiSU 能控制 SELinux
+# 4. 导出 Selinux Hook 变量 (SukiSU 控制开关必须)
 SELINUX_HOOKS="security/selinux/hooks.c"
 if [ -f "$SELINUX_HOOKS" ]; then
-    echo "   -> 导出 $SELINUX_HOOKS 变量..."
     if ! grep -q "int selinux_enforcing " "$SELINUX_HOOKS"; then
-        # 先清理可能存在的旧定义
         sed -i '/\/\* Fix for SukiSU \*\//d' "$SELINUX_HOOKS"
         sed -i '/int selinux_enforcing =/d' "$SELINUX_HOOKS"
         sed -i '/EXPORT_SYMBOL(selinux_enforcing);/d' "$SELINUX_HOOKS"
-        # 重新写入
         cat >> "$SELINUX_HOOKS" <<EOF
 
 /* Fix for SukiSU */
@@ -319,16 +295,13 @@ EOF
     fi
 fi
 
-# 5. [SukiSU 源码适配] (drivers/kernelsu/selinux/rules.c)
-# 强制让 SukiSU 使用我们导出的指针，解决参数冲突
+# 5. 适配 rules.c
 RULES_FILE="drivers/kernelsu/selinux/rules.c"
 if [ -f "$RULES_FILE" ]; then
-    echo "   -> 适配 $RULES_FILE..."
-    
-    # ⚠️ 删掉 SukiSU 原本错误的单参数声明
+    # 删除旧声明，防止冲突
     sed -i '/extern int avc_ss_reset/d' "$RULES_FILE"
     
-    # 替换 get_policydb (走指针通道)
+    # 替换实现
     sed -i '/static struct policydb \*get_policydb(void)/,/^}/c\
 extern struct policydb *ksu_policydb_ptr;\
 static struct policydb *get_policydb(void)\
@@ -336,7 +309,6 @@ static struct policydb *get_policydb(void)\
     return ksu_policydb_ptr;\
 }' "$RULES_FILE"
 
-    # 替换 reset_avc_cache (走指针通道 + 双参数调用)
     sed -i '/static void reset_avc_cache(void)/,/^}/c\
 extern struct selinux_avc *ksu_selinux_avc_ptr;\
 extern int avc_ss_reset(struct selinux_avc *avc, u32 seqno);\
