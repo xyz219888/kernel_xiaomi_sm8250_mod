@@ -65,102 +65,114 @@ curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kern
 wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch -q
 
 
-# ==================== [Step 3.5: 内核变量桥接与链接修复 (Final)] ====================
-echo "🔧 [3.5/6] 执行内核变量桥接 (Policydb & AVC)..."
+# ==================== [Step 3: 应用补丁 & 注入 Hook] ====================
+echo "🔧 [3/6] 正在应用用户提供的补丁与 Hook..."
 
-# 1. [Makefile 修复] 强制宏定义+静态链接
-DRIVERS_MAKEFILE="drivers/Makefile"
-if [ -f "$DRIVERS_MAKEFILE" ]; then
-    sed -i '/kernelsu/d' "$DRIVERS_MAKEFILE"
-    echo "ccflags-y += -DCONFIG_KSU_MANUAL_HOOK=1" >> "$DRIVERS_MAKEFILE"
-    echo "obj-y += kernelsu/" >> "$DRIVERS_MAKEFILE"
-fi
-
-# 2. [Policydb 桥接] 修改 services.c
-# 原理：policydb 是 static 的，我们导出一个全局指针 ksu_policydb_ptr 指向它
-SERVICES_FILE="security/selinux/ss/services.c"
-if [ -f "$SERVICES_FILE" ]; then
-    echo "   -> 桥接 $SERVICES_FILE..."
-    if ! grep -q "linux/export.h" "$SERVICES_FILE"; then
-        sed -i '/#include <linux\/kernel.h>/a #include <linux/export.h>' "$SERVICES_FILE"
+# --- 1. 严格应用 SUSFS 补丁 ---
+if [ -f "susfs.patch" ]; then
+    echo "   -> 检测到 susfs.patch，正在应用..."
+    # 关键修改：去掉了 '|| true'，如果失败直接报错退出！
+    # 关键修改：增加 --verbose，让你看到补丁到底干了什么
+    if patch -p1 --ignore-whitespace --fuzz=3 < susfs.patch; then
+        echo "   ✅ susfs.patch 应用成功！"
+    else
+        echo "   ❌ 错误：susfs.patch 应用失败！请检查补丁文件是否适配当前内核版本。"
+        exit 1
     fi
-    # 导出 policydb 指针
-    if ! grep -q "ksu_policydb_ptr" "$SERVICES_FILE"; then
-        cat >> "$SERVICES_FILE" <<EOF
-
-/* Fix for SukiSU: Export policydb via pointer */
-struct policydb *ksu_policydb_ptr = &selinux_ss.policydb;
-EXPORT_SYMBOL(ksu_policydb_ptr);
-EOF
-    fi
-fi
-
-# 3. [AVC 桥接] 修改 avc.c
-# 原理：selinux_avc 也是 static 的，我们导出一个全局指针 ksu_selinux_avc_ptr 指向它
-AVC_FILE="security/selinux/avc.c"
-if [ -f "$AVC_FILE" ]; then
-    echo "   -> 桥接 $AVC_FILE..."
-    if ! grep -q "linux/export.h" "$AVC_FILE"; then
-        sed -i '/#include <linux\/types.h>/a #include <linux/export.h>' "$AVC_FILE"
-    fi
-    # 导出 selinux_avc 指针 (rules.c 需要它来 reset cache)
-    if ! grep -q "ksu_selinux_avc_ptr" "$AVC_FILE"; then
-        cat >> "$AVC_FILE" <<EOF
-
-/* Fix for SukiSU: Export selinux_avc via pointer */
-struct selinux_avc *ksu_selinux_avc_ptr = &selinux_avc;
-EXPORT_SYMBOL(ksu_selinux_avc_ptr);
-EOF
-    fi
-fi
-
-# 4. [SukiSU 适配] 修改 rules.c 使用这些指针
-# 原理：强制替换 get_policydb 和 reset_avc_cache 的实现
-RULES_FILE="drivers/kernelsu/selinux/rules.c"
-if [ -f "$RULES_FILE" ]; then
-    echo "   -> 适配 $RULES_FILE 使用桥接指针..."
     
-    # 1. 替换 get_policydb 函数
-    # 删除原函数体，直接返回我们的指针
-    sed -i '/static struct policydb \*get_policydb(void)/,/^}/c\
-extern struct policydb *ksu_policydb_ptr;\
-static struct policydb *get_policydb(void)\
-{\
-    return ksu_policydb_ptr;\
-}' "$RULES_FILE"
-
-    # 2. 替换 reset_avc_cache 函数
-    # 使用我们导出的 ksu_selinux_avc_ptr
-    sed -i '/static void reset_avc_cache(void)/,/^}/c\
-extern struct selinux_avc *ksu_selinux_avc_ptr;\
-extern int avc_ss_reset(struct selinux_avc *avc, u32 seqno);\
-static void reset_avc_cache(void)\
-{\
-    avc_ss_reset(ksu_selinux_avc_ptr, 0);\
-    selnl_notify_policyload(0);\
-    selinux_status_update_policyload(NULL, 0);\
-    selinux_xfrm_notify_policyload();\
-}' "$RULES_FILE"
-fi
-
-# 5. [Selinux Enforcing 修复]
-SELINUX_HOOKS="security/selinux/hooks.c"
-if [ -f "$SELINUX_HOOKS" ]; then
-    if ! grep -q "int selinux_enforcing " "$SELINUX_HOOKS"; then
-        sed -i '/\/\* Fix for SukiSU \*\//d' "$SELINUX_HOOKS"
-        sed -i '/int selinux_enforcing =/d' "$SELINUX_HOOKS"
-        sed -i '/EXPORT_SYMBOL(selinux_enforcing);/d' "$SELINUX_HOOKS"
-        cat >> "$SELINUX_HOOKS" <<EOF
-
-/* Fix for SukiSU */
-int selinux_enforcing = 1;
-EXPORT_SYMBOL(selinux_enforcing);
-EOF
+    # 双重检查：确保头文件真的生成了
+    if [ ! -f "include/linux/susfs.h" ]; then
+        echo "   ❌ 严重错误：补丁提示成功，但 include/linux/susfs.h 依然不存在！"
+        exit 1
     fi
+else
+    echo "   ⚠️ 警告：未找到 susfs.patch，跳过 SUSFS 功能。"
 fi
 
-echo "   ✅ 桥接修复完成！Policydb 和 AVC 都已打通。"
+# --- 2. 补全内核头文件定义 (防止 undeclared identifier) ---
+echo "   -> 正在补全 sched.h 和 fs.h..."
+if ! grep -q "susfs_task_state" include/linux/sched.h; then
+    sed -i '/^	\/\* protection of the PI data mutex \*\//i \
+	#ifdef CONFIG_KSU\
+	u32 susfs_task_state;\
+	#endif' include/linux/sched.h
+fi
+if ! grep -q "INODE_STATE_SUS_KSTAT" include/linux/fs.h; then
+    sed -i '$a \
+#ifndef INODE_STATE_SUS_KSTAT\
+#define INODE_STATE_SUS_KSTAT (1UL << 30)\
+#endif' include/linux/fs.h
+fi
 
+# --- 3. 执行 Manual Hook 注入 (SukiSU Ultra 适配版) ---
+echo "   -> 正在注入 SukiSU 核心 Hook..."
+
+# 1. fs/read_write.c (Hook Read)
+sed -i '/#include <linux\/fs.h>/a \
+#ifdef CONFIG_KSU\
+extern bool ksu_init_rc_hook;\
+extern void ksu_handle_sys_read(unsigned int fd);\
+#endif' fs/read_write.c
+sed -i '/^SYSCALL_DEFINE3(read,/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU\nif (unlikely(ksu_init_rc_hook)) ksu_handle_sys_read(fd);\n#endif/' fs/read_write.c
+
+# 2. fs/exec.c (Hook Exec - 修复指针类型错误)
+sed -i '/#include <linux\/file.h>/a \
+#ifdef CONFIG_KSU\
+struct filename;\
+struct user_arg_ptr;\
+extern int ksu_handle_execveat_ksud(int *fd, struct filename **filename_ptr, struct user_arg_ptr *argv, struct user_arg_ptr *envp, int *flags);\
+#endif' fs/exec.c
+sed -i '/if (IS_ERR(filename))/i \
+#ifdef CONFIG_KSU\
+ksu_handle_execveat_ksud(\&fd, \&filename, \&argv, \&envp, \&flags);\
+#endif' fs/exec.c
+
+# 3. fs/open.c (Hook Open)
+sed -i '/#include <linux\/fs.h>/a \
+#ifdef CONFIG_KSU\
+extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\
+#endif' fs/open.c
+sed -i '/if (mode & ~S_IRWXO)/i \
+#ifdef CONFIG_KSU\
+ksu_handle_faccessat(\&dfd, \&filename, \&mode, NULL);\
+#endif' fs/open.c
+
+# 4. fs/stat.c (Hook Stat)
+sed -i '/#include <linux\/fs.h>/a \
+#ifdef CONFIG_KSU\
+extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\
+extern void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr);\
+#endif' fs/stat.c
+sed -i '/if ((flags & ~(AT_SYMLINK_NOFOLLOW/i \
+#ifdef CONFIG_KSU\
+ksu_handle_stat(\&dfd, \&filename, \&flags);\
+#endif' fs/stat.c
+sed -i '/fdput(f);/i \
+#ifdef CONFIG_KSU\
+if (!error) ksu_handle_vfs_fstat(fd, \&stat->size);\
+#endif' fs/stat.c
+
+# 5. drivers/input/input.c (Hook Input)
+sed -i '/#include <linux\/input\/mt.h>/a \
+#ifdef CONFIG_KSU\
+extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\
+#endif' drivers/input/input.c
+sed -i '/if (is_event_supported(type, dev->evbit, EV_MAX))/i \
+#ifdef CONFIG_KSU\
+ksu_handle_input_handle_event(\&type, \&code, \&value);\
+#endif' drivers/input/input.c
+
+# 6. kernel/reboot.c (Hook Reboot)
+sed -i '/#include <linux\/syscalls.h>/a \
+#ifdef CONFIG_KSU\
+extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\
+#endif' kernel/reboot.c
+sed -i '/if (check_poweroff_charger_mode())/i \
+#ifdef CONFIG_KSU\
+ksu_handle_sys_reboot(magic1, magic2, cmd, \&arg);\
+#endif' kernel/reboot.c
+
+echo "   ✅ 补丁应用与 Hook 注入全部完成！"
 
 # ==================== [Step 3.5: 内核变量桥接与链接修复 (Final)] ====================
 echo "🔧 [3.5/6] 执行内核变量桥接 (Policydb & AVC)..."
