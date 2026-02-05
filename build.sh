@@ -128,13 +128,12 @@ echo "⬇️ [2/6] 下载 SukiSU & SUSFS..."
 curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch -q
 
-# ==================== [Step 3: 补丁应用 & 核心 Hook 注入 (8文件终极版)] ====================
-echo "🔧 [3/6] 正在应用补丁与注入 Hook (基于 ReSukiSU 教程 + Ultra 源码适配)..."
+# ==================== [Step 3: 补丁应用 & 核心 Hook 注入 (Fix Sys.c)] ====================
+echo "🔧 [3/6] 正在应用补丁与注入 Hook (修复 Sys.c 声明报错)..."
 
 # --- 1. 应用 SUSFS 补丁 ---
 if [ -f "susfs.patch" ]; then
     echo "   -> 正在应用 susfs.patch..."
-    # 严格模式：失败直接退出
     if patch -p1 --ignore-whitespace --fuzz=3 < susfs.patch; then
         echo "   ✅ susfs.patch 应用成功！"
     else
@@ -145,7 +144,7 @@ else
     echo "   ⚠️ 警告：未找到 susfs.patch！"
 fi
 
-# --- 2. 补全头文件定义 ---
+# --- 2. 补全头文件 ---
 if ! grep -q "susfs_task_state" include/linux/sched.h; then
     sed -i '/^	\/\* protection of the PI data mutex \*\//i \
 	#ifdef CONFIG_KSU\
@@ -159,21 +158,20 @@ if ! grep -q "INODE_STATE_SUS_KSTAT" include/linux/fs.h; then
 #endif' include/linux/fs.h
 fi
 
-# --- 3. 执行 Hook 注入 (8个文件逐一击破) ---
+# --- 3. 执行 Hook 注入 ---
 echo "   -> 正在注入 Manual Hook..."
 
-# [1] fs/read_write.c
-# 适配: 使用 ksu_init_rc_hook 控制启动
+# [1] fs/read_write.c (Hook Read)
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU\
 extern bool ksu_init_rc_hook;\
 extern void ksu_handle_sys_read(unsigned int fd);\
 #endif' fs/read_write.c
 
+# 这里的注入位置通常在函数最开头，因为 4.19+ 的 read 函数很简单，没有变量声明，所以不会报错
 sed -i '/^SYSCALL_DEFINE3(read,/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU\nif (unlikely(ksu_init_rc_hook)) ksu_handle_sys_read(fd);\n#endif/' fs/read_write.c
 
-# [2] fs/exec.c (关键适配)
-# 适配: SukiSU Ultra 使用 _ksud 后缀，传入 &argv 避免类型冲突
+# [2] fs/exec.c (Hook Exec)
 sed -i '/#include <linux\/file.h>/a \
 #ifdef CONFIG_KSU\
 struct filename;\
@@ -181,14 +179,13 @@ struct user_arg_ptr;\
 extern int ksu_handle_execveat_ksud(int *fd, struct filename **filename_ptr, struct user_arg_ptr *argv, struct user_arg_ptr *envp, int *flags);\
 #endif' fs/exec.c
 
-# 注入位置: if (IS_ERR(filename)) 之前
+# 注入在 if (IS_ERR(filename)) 之前，这已经是声明之后了，安全
 sed -i '/if (IS_ERR(filename))/i \
 #ifdef CONFIG_KSU\
 ksu_handle_execveat_ksud(\&fd, \&filename, \&argv, \&envp, \&flags);\
 #endif' fs/exec.c
 
-# [3] fs/open.c
-# 适配: do_faccessat
+# [3] fs/open.c (Hook Open)
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\
@@ -199,28 +196,24 @@ sed -i '/if (mode & ~S_IRWXO)/i \
 ksu_handle_faccessat(\&dfd, \&filename, \&mode, NULL);\
 #endif' fs/open.c
 
-# [4] fs/stat.c
-# 适配: statx 和 fstat
+# [4] fs/stat.c (Hook Stat)
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\
 extern void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr);\
 #endif' fs/stat.c
 
-# vfs_statx 入口
 sed -i '/if ((flags & ~(AT_SYMLINK_NOFOLLOW/i \
 #ifdef CONFIG_KSU\
 ksu_handle_stat(\&dfd, \&filename, \&flags);\
 #endif' fs/stat.c
 
-# vfs_statx_fd 出口 (fdput之前)
 sed -i '/fdput(f);/i \
 #ifdef CONFIG_KSU\
 if (!error) ksu_handle_vfs_fstat(fd, \&stat->size);\
 #endif' fs/stat.c
 
-# [5] drivers/input/input.c
-# 适配: input_handle_event
+# [5] drivers/input/input.c (Hook Input)
 sed -i '/#include <linux\/input\/mt.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\
@@ -231,8 +224,7 @@ sed -i '/if (is_event_supported(type, dev->evbit, EV_MAX))/i \
 ksu_handle_input_handle_event(\&type, \&code, \&value);\
 #endif' drivers/input/input.c
 
-# [6] kernel/reboot.c
-# 适配: sys_reboot
+# [6] kernel/reboot.c (Hook Reboot)
 sed -i '/#include <linux\/syscalls.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\
@@ -243,23 +235,24 @@ sed -i '/if (check_poweroff_charger_mode())/i \
 ksu_handle_sys_reboot(magic1, magic2, cmd, \&arg);\
 #endif' kernel/reboot.c
 
-# [7] kernel/sys.c (🔥 救命 Hook: 解决 Unknown 问题)
-# 适配: __sys_setresuid
+# [7] kernel/sys.c (🔥 关键修复：Setuid Hook)
+# 修正：不再插在函数开头，而是插在变量声明结束之后
 if [ -f "kernel/sys.c" ]; then
-    echo "   -> 正在注入 kernel/sys.c (Setuid Hook)..."
+    echo "   -> 正在注入 kernel/sys.c (修复位置版)..."
     sed -i '/#include <linux\/syscalls.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);\
 #endif' kernel/sys.c
 
-    # 注入到函数开头
-    sed -i '/long __sys_setresuid(uid_t ruid, uid_t euid, uid_t suid)/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU\nksu_handle_setresuid(ruid, euid, suid);\n#endif/' kernel/sys.c
+    # 寻找 'kruid = make_kuid' 这一行，这通常是声明结束后的第一行逻辑
+    # 在它前面插入代码，就绝对安全了
+    sed -i '/kruid = make_kuid(ns, ruid);/i \
+#ifdef CONFIG_KSU\
+    ksu_handle_setresuid(ruid, euid, suid);\
+#endif' kernel/sys.c
 fi
 
-# [8] security/selinux/hooks.c (无需逻辑注入，但在 Step 3.5 处理导出)
-# ReSukiSU 教程指出 4.19+ 不需要 is_ksu_transition 钩子，所以这里跳过，避免画蛇添足。
-
-echo "   ✅ 8核心文件 Hook 注入全部完成！"
+echo "   ✅ 8核心文件 Hook 注入完成 (已修复 sys.c 编译错误)！"
 
 # ==================== [Step 3.5: 变量桥接与链接修复] ====================
 echo "🔧 [3.5/6] 正在执行变量桥接与冲突修复..."
