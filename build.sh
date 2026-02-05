@@ -25,64 +25,112 @@ MAKE_ARGS="ARCH=arm64 SUBARCH=arm64 O=out \
 
 echo -e "\033[0;32m=== 🚀 开始编译 (适配 SM8250 + SukiSU Final) ===\033[0m"
 
-# ==================== [Step 1: 源码深度净化] ====================
-echo "🧹 [1/6] 执行源码深度净化 (使用直链恢复官方版本)..."
+# ==================== [Step 1: 源码深度净化 (重置+扫雷)] ====================
+echo "🧹 [1/6] 执行源码深度净化 (用户补丁重置 + 深度残余清理)..."
 
-# 1. 基础重置
+# 1. [用户指定] 基础重置 (应用远程修复补丁)
+# 这行是你指定的，用于修复断行或重置基础状态
 curl -L https://github.com/ApartTUSITU/kernel_xiaomi_sm8250_mod/commit/a05557c.patch | git apply -v >/dev/null 2>&1 || true
+
+# 2. 清理编译残留与旧驱动目录
 rm -rf drivers/kernelsu drivers/susfs fs/susfs out/
 mkdir -p out
 
-# 2. [直链下载] 恢复 6 个核心文件 (UtsavBalar1231 官方纯净版)
-echo "   -> 正在恢复核心文件..."
+# 3. 定义深度清理函数 (专门对付断行尸体和残留代码)
+clean_file_deep() {
+    local file="$1"
+    if [ -f "$file" ]; then
+        echo "   -> 正在为 $file 进行深度清创..."
+        
+        # --- 第一层：逻辑块切除 (宏观) ---
+        # 删除所有 KSU/SUSFS 相关的宏包裹块 (多行删除)
+        sed -i '/#ifdef CONFIG_KSU/,/#endif/d' "$file"
+        sed -i '/#if defined(CONFIG_KSU_SUSFS/,/#endif/d' "$file"
+        sed -i '/#ifdef CONFIG_KSU_SUSFS/,/#endif/d' "$file"
+        
+        # --- 第二层：残留声明狙击 (微观) ---
+        # 即使不在 ifdef 里，只要包含这些特征，统统干掉
+        sed -i '/extern bool ksu_/d' "$file"
+        sed -i '/extern int ksu_/d' "$file"
+        sed -i '/extern void ksu_/d' "$file"
+        sed -i '/extern void susfs_/d' "$file"
+        
+        # --- 第三层：断行尸体清理 (核心修复: 针对 expected identifier 报错) ---
+        # 专门清理 Patch 失败后留下的孤儿参数声明
+        sed -i '/void \*argv, void \*envp, int \*flags);/d' "$file"
+        sed -i '/void \*envp, int \*flags);/d' "$file"
+        sed -i '/struct filename \*\*filename_ptr,/d' "$file"
+        sed -i '/int \*mode, int \*flags);/d' "$file"
+        
+        # --- 第四层：头文件引用清理 ---
+        sed -i '/#include <linux\/susfs/d' "$file"
+        sed -i '/#include "susfs/d' "$file"
+        
+    else
+        echo "   ⚠️ 文件 $file 不存在，跳过清理。"
+    fi
+}
 
-# fs/read_write.c
-curl -s -L "https://raw.githubusercontent.com/UtsavBalar1231/kernel_xiaomi_sm8250/99352d52fed224160798675f138d6af0051a5e5c/fs/read_write.c" -o fs/read_write.c || echo "❌ read_write.c 下载失败"
+# 4. 对 6 个核心文件逐一执行手术
 
-# fs/exec.c
-curl -s -L "https://raw.githubusercontent.com/UtsavBalar1231/kernel_xiaomi_sm8250/99352d52fed224160798675f138d6af0051a5e5c/fs/exec.c" -o fs/exec.c || echo "❌ exec.c 下载失败"
+# [fs/exec.c]
+clean_file_deep "fs/exec.c"
+sed -i '/ksu_execveat_hook/d' fs/exec.c  # 补刀
 
-# fs/open.c
-curl -s -L "https://raw.githubusercontent.com/UtsavBalar1231/kernel_xiaomi_sm8250/99352d52fed224160798675f138d6af0051a5e5c/fs/open.c" -o fs/open.c || echo "❌ open.c 下载失败"
+# [fs/read_write.c]
+clean_file_deep "fs/read_write.c"
+sed -i '/ksu_vfs_read_hook/d' fs/read_write.c
 
-# fs/stat.c
-curl -s -L "https://raw.githubusercontent.com/UtsavBalar1231/kernel_xiaomi_sm8250/99352d52fed224160798675f138d6af0051a5e5c/fs/stat.c" -o fs/stat.c || echo "❌ stat.c 下载失败"
+# [fs/open.c]
+clean_file_deep "fs/open.c"
+sed -i '/ksu_handle_faccessat/d' fs/open.c
 
-# drivers/input/input.c
-curl -s -L "https://raw.githubusercontent.com/UtsavBalar1231/kernel_xiaomi_sm8250/99352d52fed224160798675f138d6af0051a5e5c/drivers/input/input.c" -o drivers/input/input.c || echo "❌ input.c 下载失败"
+# [fs/stat.c]
+clean_file_deep "fs/stat.c"
+sed -i '/susfs_sus_ino_for_generic_fillattr/d' fs/stat.c
 
-# kernel/reboot.c (新增)
-curl -s -L "https://raw.githubusercontent.com/UtsavBalar1231/kernel_xiaomi_sm8250/99352d52fed224160798675f138d6af0051a5e5c/kernel/reboot.c" -o kernel/reboot.c || echo "❌ reboot.c 下载失败"
+# [drivers/input/input.c]
+clean_file_deep "drivers/input/input.c"
+sed -i '/ksu_input_hook/d' drivers/input/input.c
 
-# 3. 还原头文件 (防止误伤)
-git checkout include/linux/sched.h include/linux/fs.h 2>/dev/null || true
+# [kernel/reboot.c]
+clean_file_deep "kernel/reboot.c"
 
-echo "   ✅ 6 个核心文件已恢复为纯净状态！"
+# 5. 修复头文件 (防止宏定义冲突)
+echo "   -> 正在检查头文件残留..."
+if [ -f "include/linux/fs.h" ]; then
+    sed -i '/INODE_STATE_SUS_KSTAT/d' include/linux/fs.h
+fi
+if [ -f "include/linux/sched.h" ]; then
+    sed -i '/susfs_task_state/d' include/linux/sched.h
+fi
+
+echo "   ✅ 深度净化完成！补丁重置已应用，所有代码残留已清除。"
 
 # ==================== [Step 2: 下载组件] ====================
 echo "⬇️ [2/6] 下载 SukiSU & SUSFS..."
 curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch -q
 
-
 # ==================== [Step 3: 补丁应用 & 核心 Hook 注入] ====================
-echo "🔧 [3/6] 正在应用补丁与注入 Hook (源码级验证版)..."
+echo "🔧 [3/6] 正在应用补丁与注入 Hook (基于用户 111111 源码定制)..."
 
-# --- 1. 应用 SUSFS 补丁 ---
+# --- 1. 应用 SUSFS 补丁 (严格模式) ---
 if [ -f "susfs.patch" ]; then
     echo "   -> 正在应用 susfs.patch..."
-    # 严格模式：失败直接退出，不隐藏错误
+    # 强制检查：补丁必须成功，否则退出
     if patch -p1 --ignore-whitespace --fuzz=3 < susfs.patch; then
         echo "   ✅ susfs.patch 应用成功！"
     else
-        echo "   ❌ 错误：susfs.patch 应用失败！"
+        echo "   ❌ 错误：susfs.patch 应用失败！请检查 Step 1 是否执行彻底。"
         exit 1
     fi
 else
     echo "   ⚠️ 警告：未找到 susfs.patch！"
 fi
 
-# --- 2. 补全头文件 (防止编译报错) ---
+# --- 2. 补全头文件定义 (防止 undeclared identifier) ---
+# 这一步是为了让编译器认识 susfs_task_state 等变量
 if ! grep -q "susfs_task_state" include/linux/sched.h; then
     sed -i '/^	\/\* protection of the PI data mutex \*\//i \
 	#ifdef CONFIG_KSU\
@@ -96,83 +144,101 @@ if ! grep -q "INODE_STATE_SUS_KSTAT" include/linux/fs.h; then
 #endif' include/linux/fs.h
 fi
 
-# --- 3. 注入 Hook (基于你上传的文件精准匹配) ---
+# --- 3. 执行 Hook 注入 (精准匹配 111111 文件结构) ---
 echo "   -> 正在注入 Manual Hook..."
 
-# [Read Hook] 匹配 1read_write.c
+# 1. [fs/read_write.c]
+# 目标: SYSCALL_DEFINE3(read, ...)
+# SukiSU 接口: ksu_handle_sys_read(fd)
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU\
 extern bool ksu_init_rc_hook;\
 extern void ksu_handle_sys_read(unsigned int fd);\
 #endif' fs/read_write.c
+
 sed -i '/^SYSCALL_DEFINE3(read,/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU\nif (unlikely(ksu_init_rc_hook)) ksu_handle_sys_read(fd);\n#endif/' fs/read_write.c
 
-# [Exec Hook] 匹配 1exec.c (__do_execve_file)
-# 使用 ksu_handle_execveat_ksud 完美兼容 struct filename 和 user_arg_ptr
+# 2. [fs/exec.c] (重点修复)
+# 目标: __do_execve_file
+# 修复: 声明 struct user_arg_ptr，并传入 &argv (地址)
 sed -i '/#include <linux\/file.h>/a \
 #ifdef CONFIG_KSU\
 struct filename;\
 struct user_arg_ptr;\
 extern int ksu_handle_execveat_ksud(int *fd, struct filename **filename_ptr, struct user_arg_ptr *argv, struct user_arg_ptr *envp, int *flags);\
 #endif' fs/exec.c
+
+# 注入点: if (IS_ERR(filename)) 之前
 sed -i '/if (IS_ERR(filename))/i \
 #ifdef CONFIG_KSU\
 ksu_handle_execveat_ksud(\&fd, \&filename, \&argv, \&envp, \&flags);\
 #endif' fs/exec.c
 
-# [Open Hook] 匹配 1open.c (do_faccessat)
+# 3. [fs/open.c]
+# 目标: do_faccessat
+# SukiSU 接口: ksu_handle_faccessat
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\
 #endif' fs/open.c
+
 sed -i '/if (mode & ~S_IRWXO)/i \
 #ifdef CONFIG_KSU\
 ksu_handle_faccessat(\&dfd, \&filename, \&mode, NULL);\
 #endif' fs/open.c
 
-# [Stat Hook] 匹配 1stat.c (vfs_statx, vfs_statx_fd)
+# 4. [fs/stat.c]
+# 目标: vfs_statx 和 vfs_statx_fd
+# 注入 1: vfs_statx (修改路径)
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\
 extern void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr);\
 #endif' fs/stat.c
-# 注入 vfs_statx
+
 sed -i '/if ((flags & ~(AT_SYMLINK_NOFOLLOW/i \
 #ifdef CONFIG_KSU\
 ksu_handle_stat(\&dfd, \&filename, \&flags);\
 #endif' fs/stat.c
-# 注入 vfs_statx_fd
+
+# 注入 2: vfs_statx_fd (修改 fd) - 位于 fdput(f) 之前
 sed -i '/fdput(f);/i \
 #ifdef CONFIG_KSU\
 if (!error) ksu_handle_vfs_fstat(fd, \&stat->size);\
 #endif' fs/stat.c
 
-# [Input Hook] 匹配 1input.c (input_event)
+# 5. [drivers/input/input.c]
+# 目标: input_event
+# SukiSU 接口: ksu_handle_input_handle_event
 sed -i '/#include <linux\/input\/mt.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\
 #endif' drivers/input/input.c
+
 sed -i '/if (is_event_supported(type, dev->evbit, EV_MAX))/i \
 #ifdef CONFIG_KSU\
 ksu_handle_input_handle_event(\&type, \&code, \&value);\
 #endif' drivers/input/input.c
 
-# [Reboot Hook] 匹配 1reboot.c
+# 6. [kernel/reboot.c]
+# 目标: check_poweroff_charger_mode 附近
 sed -i '/#include <linux\/syscalls.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\
 #endif' kernel/reboot.c
+
 sed -i '/if (check_poweroff_charger_mode())/i \
 #ifdef CONFIG_KSU\
 ksu_handle_sys_reboot(magic1, magic2, cmd, \&arg);\
 #endif' kernel/reboot.c
 
-echo "   ✅ 核心 Hook 注入完成！"
+echo "   ✅ 核心 Hook 注入完成！(已匹配 111111 文件特征)"
 
-# ==================== [Step 3.5: 内核变量桥接与链接修复] ====================
+# ==================== [Step 3.5: 变量桥接与链接修复] ====================
 echo "🔧 [3.5/6] 正在执行变量桥接与冲突修复..."
 
 # 1. 强制 Makefile 静态链接 & 开启 Manual Hook 宏
+# 确保 core/hook.c 里的变量能被编译出来
 DRIVERS_MAKEFILE="drivers/Makefile"
 if [ -f "$DRIVERS_MAKEFILE" ]; then
     sed -i '/kernelsu/d' "$DRIVERS_MAKEFILE"
@@ -181,12 +247,14 @@ if [ -f "$DRIVERS_MAKEFILE" ]; then
 fi
 
 # 2. [Policydb 桥接] 解决 'undefined reference to policydb'
+# 你的 services.c 里 policydb 藏在 selinux_ss 结构体里
 SERVICES_FILE="security/selinux/ss/services.c"
 if [ -f "$SERVICES_FILE" ]; then
     echo "   -> 桥接 $SERVICES_FILE..."
     if ! grep -q "linux/export.h" "$SERVICES_FILE"; then
         sed -i '/#include <linux\/kernel.h>/a #include <linux/export.h>' "$SERVICES_FILE"
     fi
+    # 导出指针
     if ! grep -q "ksu_policydb_ptr" "$SERVICES_FILE"; then
         cat >> "$SERVICES_FILE" <<EOF
 
@@ -198,12 +266,14 @@ EOF
 fi
 
 # 3. [AVC 桥接] 解决 'conflicting types for avc_ss_reset'
+# 你的 avc.c 里 avc_ss_reset 是 2 个参数，但 SukiSU 以为是 1 个
 AVC_FILE="security/selinux/avc.c"
 if [ -f "$AVC_FILE" ]; then
     echo "   -> 桥接 $AVC_FILE..."
     if ! grep -q "linux/export.h" "$AVC_FILE"; then
         sed -i '/#include <linux\/types.h>/a #include <linux/export.h>' "$AVC_FILE"
     fi
+    # 导出 selinux_avc 全局变量的指针，作为第 1 个参数传进去
     if ! grep -q "ksu_selinux_avc_ptr" "$AVC_FILE"; then
         cat >> "$AVC_FILE" <<EOF
 
@@ -214,12 +284,14 @@ EOF
     fi
 fi
 
-# 4. [SukiSU 适配] 修改 rules.c 以匹配你的内核
+# 4. [SukiSU 源码适配] 修改 rules.c
+# 这是最关键的一步：修改 SukiSU 源码来适配你的内核
 RULES_FILE="drivers/kernelsu/selinux/rules.c"
 if [ -f "$RULES_FILE" ]; then
     echo "   -> 适配 $RULES_FILE (清理冲突声明)..."
     
     # ⚠️ 删掉 SukiSU 原本错误的单参数声明
+    # 这一行必须删，否则编译必报 conflicting types
     sed -i '/extern int avc_ss_reset/d' "$RULES_FILE"
     
     # 替换 get_policydb (走指针通道)
@@ -231,6 +303,7 @@ static struct policydb *get_policydb(void)\
 }' "$RULES_FILE"
 
     # 替换 reset_avc_cache (走指针通道 + 双参数调用)
+    # 我们在这里重新声明 avc_ss_reset，写成正确的 2 参数版本
     sed -i '/static void reset_avc_cache(void)/,/^}/c\
 extern struct selinux_avc *ksu_selinux_avc_ptr;\
 extern int avc_ss_reset(struct selinux_avc *avc, u32 seqno);\
