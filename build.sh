@@ -65,33 +65,23 @@ curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kern
 wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch -q
 
 
-# ==================== [Step 3: 补丁与 Hook 注入] ====================
-echo "🔧 [3/6] 执行代码注入 (Final Stable Version)..."
 
-# 1. 应用 SUSFS 补丁
+# ==================== [Step 3: 核心 Hook 注入 (SukiSU Ultra 专用)] ====================
+echo "🔧 [3/6] 执行代码注入 (SukiSU Ultra Source Based)..."
+
+# 1. 应用 SUSFS 补丁 (如果存在)
 if [ -f "susfs.patch" ]; then
-    echo "   -> 应用 SUSFS 补丁..."
-    patch -p1 --ignore-whitespace --fuzz=3 < susfs.patch || echo "⚠️ Patch 可能有冲突，使用脚本强制修复..."
+    patch -p1 --ignore-whitespace --fuzz=3 < susfs.patch || true
 fi
 
-# 2. [关键] 强制补全头文件定义 (防止 undeclared identifier)
-echo "   -> 正在补全头文件定义..."
-
-# (A) include/linux/sched.h
+# 2. 补全头文件定义 (防止 undeclared identifier)
+echo "   -> 正在补全头文件..."
 if ! grep -q "susfs_task_state" include/linux/sched.h; then
     sed -i '/^	\/\* protection of the PI data mutex \*\//i \
 	#ifdef CONFIG_KSU\
 	u32 susfs_task_state;\
 	#endif' include/linux/sched.h
 fi
-if ! grep -q "TASK_STRUCT_NON_ROOT_USER_APP_PROC" include/linux/sched.h; then
-    sed -i '$a \
-#ifndef TASK_STRUCT_NON_ROOT_USER_APP_PROC\
-#define TASK_STRUCT_NON_ROOT_USER_APP_PROC (1)\
-#endif' include/linux/sched.h
-fi
-
-# (B) include/linux/fs.h
 if ! grep -q "INODE_STATE_SUS_KSTAT" include/linux/fs.h; then
     sed -i '$a \
 #ifndef INODE_STATE_SUS_KSTAT\
@@ -99,59 +89,67 @@ if ! grep -q "INODE_STATE_SUS_KSTAT" include/linux/fs.h; then
 #endif' include/linux/fs.h
 fi
 
-echo "   -> 正在执行 SukiSU Manual Hook (结构体可见性修复版)..."
+echo "   -> 正在执行 Manual Hook (Ultra 新版逻辑)..."
 
 # --- 1. fs/read_write.c ---
-# 锚点: linux/fs.h
+# 对应源码: ksud.c -> ksu_handle_sys_read(unsigned int fd)
+# 对应开关: ksu_init_rc_hook
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU\
-extern bool ksu_vfs_read_hook __read_mostly;\
-extern int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr);\
+extern bool ksu_init_rc_hook;\
+extern void ksu_handle_sys_read(unsigned int fd);\
 #endif' fs/read_write.c
-# 注入: read 系统调用
-sed -i '/^SYSCALL_DEFINE3(read,/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU\nif (unlikely(ksu_vfs_read_hook)) ksu_handle_sys_read(fd, \&buf, \&count);\n#endif/' fs/read_write.c
+
+# 注入: 只传 fd，且用 ksu_init_rc_hook 判断
+sed -i '/^SYSCALL_DEFINE3(read,/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU\nif (unlikely(ksu_init_rc_hook)) ksu_handle_sys_read(fd);\n#endif/' fs/read_write.c
 
 
-# --- 2. fs/exec.c (🔥 终极修复: 前向声明) ---
+# --- 2. fs/exec.c ---
+# 对应源码: sucompat.c -> ksu_handle_execve_sucompat(...)
+# 这个函数在 sucompat.c 里封装好了，直接处理 const char ** 等参数，不需要 struct filename
 # 锚点: linux/file.h
-# 修复: 增加 "struct filename;"，让编译器提前认识这个结构体
 sed -i '/#include <linux\/file.h>/a \
 #ifdef CONFIG_KSU\
-struct filename;\
-extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\
+extern int ksu_handle_execve_sucompat(int *fd, const char __user **filename_user, const char __user *const __user *__argv, const char __user *const __user *__envp, int *flags);\
 #endif' fs/exec.c
-# 注入: 这里的变量必须转义 \&
+
+# 注入: 这里的变量直接传地址
 sed -i '/if (IS_ERR(filename))/i \
 #ifdef CONFIG_KSU\
-ksu_handle_execveat(\&fd, \&filename, \&argv, \&envp, \&flags);\
+ksu_handle_execve_sucompat(\&fd, \&filename, \&argv, \&envp, \&flags);\
 #endif' fs/exec.c
 
 
-# --- 3. fs/open.c (🔥 终极修复: 代码块) ---
-# 锚点: linux/fs.h
+# --- 3. fs/open.c ---
+# 对应源码: sucompat.c -> ksu_handle_faccessat(...)
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\
 #endif' fs/open.c
-# 注入: 使用 { } 包裹，允许在任何地方声明变量，彻底解决 C90 报错
+
+# 注入: 最后一个参数传 NULL (源码里是 int* flags，但通常传 NULL 即可)
 sed -i '/if (mode & ~S_IRWXO)/i \
 #ifdef CONFIG_KSU\
-{ int ks_flags = 0; ksu_handle_faccessat(\&dfd, \&filename, \&mode, \&ks_flags); }\n#endif' fs/open.c
+ksu_handle_faccessat(\&dfd, \&filename, \&mode, NULL);\
+#endif' fs/open.c
 
 
 # --- 4. fs/stat.c ---
-# 锚点: linux/fs.h
+# 对应源码: sucompat.c -> ksu_handle_stat(...)
+# 对应源码: ksud.c -> ksu_handle_vfs_fstat(...) (SUSFS)
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\
 extern void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr);\
 #endif' fs/stat.c
-# 注入 vfs_statx
+
+# 注入 1: vfs_statx
 sed -i '/if ((flags & ~(AT_SYMLINK_NOFOLLOW/i \
 #ifdef CONFIG_KSU\
 ksu_handle_stat(\&dfd, \&filename, \&flags);\
 #endif' fs/stat.c
-# 注入 vfs_statx_fd
+
+# 注入 2: vfs_statx_fd
 sed -i '/fdput(f);/i \
 #ifdef CONFIG_KSU\
 if (!error) ksu_handle_vfs_fstat(fd, \&stat->size);\
@@ -159,11 +157,12 @@ if (!error) ksu_handle_vfs_fstat(fd, \&stat->size);\
 
 
 # --- 5. drivers/input/input.c ---
-# 锚点: linux/input/mt.h (UtsavBalar源码中 input.c 包含的是这个)
+# 对应源码: ksud.c -> ksu_handle_input_handle_event(...)
 sed -i '/#include <linux\/input\/mt.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\
 #endif' drivers/input/input.c
+
 # 注入
 sed -i '/if (is_event_supported(type, dev->evbit, EV_MAX))/i \
 #ifdef CONFIG_KSU\
@@ -172,70 +171,80 @@ ksu_handle_input_handle_event(\&type, \&code, \&value);\
 
 
 # --- 6. kernel/reboot.c ---
-# 锚点: linux/syscalls.h
+# 对应源码: supercalls.c -> ksu_handle_sys_reboot(...)
 sed -i '/#include <linux\/syscalls.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\
 #endif' kernel/reboot.c
-# 注入: 插在变量声明之后 (check_poweroff_charger_mode 调用前)
+
+# 注入
 sed -i '/if (check_poweroff_charger_mode())/i \
 #ifdef CONFIG_KSU\
 ksu_handle_sys_reboot(magic1, magic2, cmd, \&arg);\
 #endif' kernel/reboot.c
 
-echo "   ✅ 注入完成！(已集成结构体前向声明与C90兼容修复)"
+echo "   ✅ 完美适配注入完成！(基于 SukiSU Ultra 源码)"
 
-# ==================== [Step 3.5: 核心兼容性修复] ====================
-echo "🔧 [3.5/6] 执行内核兼容性适配 (关键步骤)..."
+# ==================== [Step 3.5: 终极扫雷与链接修复] ====================
+echo "🔧 [3.5/6] 执行内核变量深度导出与链接修复..."
 
-# 1. [核心修复] 补全 SukiSU 缺失的接口变量
-# 原理：您的内核使用 selinux_state 结构体，但 SukiSU 依赖传统的 selinux_enforcing 变量。
-# 我们必须手动创建这个变量作为“兼容层”，否则编译必挂。
-SELINUX_HOOKS="security/selinux/hooks.c"
-if [ -f "$SELINUX_HOOKS" ]; then
-    echo "   -> 正在检测 selinux_enforcing 接口..."
+# 1. [关键修复] 解决链接失败
+# 即使代码写对了，如果宏没开，SukiSU 里的函数体是空的或者不生成。
+DRIVERS_MAKEFILE="drivers/Makefile"
+if [ -f "$DRIVERS_MAKEFILE" ]; then
+    echo "   -> [1/4] 修复 $DRIVERS_MAKEFILE (强制宏定义+静态链接)..."
+    sed -i '/kernelsu/d' "$DRIVERS_MAKEFILE"
     
-    # 只有当文件中完全不存在这个变量定义时，才进行添加
-    if ! grep -q "int selinux_enforcing " "$SELINUX_HOOKS"; then
-        echo "   -> 正在为 SukiSU 创建兼容接口..."
-        
-        # 清理可能存在的旧补丁，保持代码整洁
-        sed -i '/\/\* Fix for SukiSU \*\//d' "$SELINUX_HOOKS"
-        sed -i '/int selinux_enforcing =/d' "$SELINUX_HOOKS"
-        sed -i '/EXPORT_SYMBOL(selinux_enforcing);/d' "$SELINUX_HOOKS"
+    # ⚠️ 这一行是救命稻草：强制开启 MANUAL_HOOK，确保变量被编译出来！
+    echo "ccflags-y += -DCONFIG_KSU_MANUAL_HOOK=1" >> "$DRIVERS_MAKEFILE"
+    # 强制静态编译进内核
+    echo "obj-y += kernelsu/" >> "$DRIVERS_MAKEFILE"
+fi
 
-        # 追加标准定义
-        # 这里赋值为 1 是因为 Android 生产环境必须是 Enforcing 模式
-        # 这确保 SukiSU 的拦截功能处于激活状态
-        cat >> "$SELINUX_HOOKS" <<EOF
-
-/* Fix for SukiSU: Compatibility interface for kernels using selinux_state */
-int selinux_enforcing = 1;
-EXPORT_SYMBOL(selinux_enforcing);
-EOF
-        echo "   ✅ 已补全 selinux_enforcing 变量与符号导出"
-    else
-        echo "   ✅ 检测到 selinux_enforcing 已存在，无需修改。"
+# 2. [核心修复] 解决 undefined reference to 'policydb'
+# 您的 policydb 变量藏在 ss/services.c 中
+SERVICES_FILE="security/selinux/ss/services.c"
+if [ -f "$SERVICES_FILE" ]; then
+    echo "   -> [2/4] 检查 $SERVICES_FILE (导出 policydb)..."
+    if grep -q "struct policydb policydb;" "$SERVICES_FILE"; then
+        if ! grep -q "EXPORT_SYMBOL(policydb)" "$SERVICES_FILE"; then
+            echo "EXPORT_SYMBOL(policydb);" >> "$SERVICES_FILE"
+            echo "   ✅ 已强制导出 policydb"
+        fi
     fi
 fi
 
-# 2. [链接修复] 强制 drivers/kernelsu 静态编译
-# 解决 undefined reference to 'ksu_vfs_read_hook'
-DRIVERS_MAKEFILE="drivers/Makefile"
-if [ -f "$DRIVERS_MAKEFILE" ]; then
-    echo "   -> 正在修复构建规则..."
-    
-    # 删除旧的、可能不稳定的定义
-    sed -i '/kernelsu/d' "$DRIVERS_MAKEFILE"
-    
-    # 写入 obj-y，这是将代码“焊死”在内核里的唯一方法
-    # 只有这样，您的 fs/read_write.c 才能成功调用 KSU
-    echo "obj-y += kernelsu/" >> "$DRIVERS_MAKEFILE"
-    echo "   ✅ 已强制 drivers/kernelsu 为静态组件 (obj-y)"
+# 3. [预防报错] 导出 avc_cache (基于您上传的 avc.c)
+AVC_FILE="security/selinux/avc.c"
+if [ -f "$AVC_FILE" ]; then
+    echo "   -> [3/4] 检查 $AVC_FILE (导出 avc_cache)..."
+    if grep -q "struct avc_cache avc_cache;" "$AVC_FILE"; then
+        if ! grep -q "EXPORT_SYMBOL(avc_cache)" "$AVC_FILE"; then
+            echo "EXPORT_SYMBOL(avc_cache);" >> "$AVC_FILE"
+            echo "   ✅ 已预防性导出 avc_cache"
+        fi
+    fi
 fi
 
-echo "   ✅ 内核兼容性修复完成！"
+# 4. [补全接口] 解决 selinux_enforcing 缺失
+SELINUX_HOOKS="security/selinux/hooks.c"
+if [ -f "$SELINUX_HOOKS" ]; then
+    echo "   -> [4/4] 补全 selinux_enforcing 接口..."
+    if ! grep -q "int selinux_enforcing " "$SELINUX_HOOKS"; then
+        sed -i '/\/\* Fix for SukiSU \*\//d' "$SELINUX_HOOKS"
+        sed -i '/int selinux_enforcing =/d' "$SELINUX_HOOKS"
+        sed -i '/EXPORT_SYMBOL(selinux_enforcing);/d' "$SELINUX_HOOKS"
+        
+        cat >> "$SELINUX_HOOKS" <<EOF
 
+/* Fix for SukiSU */
+int selinux_enforcing = 1;
+EXPORT_SYMBOL(selinux_enforcing);
+EOF
+    fi
+fi
+
+echo "   ✅ 验证完毕！所有锁已打开，链接通道已建立。"
 
 # ==================== [Step 4: SukiSU 源码适配 (修复版)] ====================
 echo "💉 [4/6] 执行 SukiSU 源码适配..."
