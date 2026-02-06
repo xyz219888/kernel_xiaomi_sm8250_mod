@@ -40,9 +40,14 @@ jobs:
     - name: Build kernel for Alioth
       run: |
         bash build.sh alioth
-    # 上传产物 (已修复文件名匹配)
+    # 上传产物 (通配符版 - 专治文件名不匹配)
     - name: Upload zip
       uses: actions/upload-artifact@v4
       with:
-        name: Kernel_Alioth_KSU_SUSFS
-        path: Kernel_Alioth_KSU_SUSFS_*.zip
+        # name 是在网页上显示的下载按钮名字，可以随便起，不影响文件
+        name: Kernel_Alioth_Build_Result
+        # path 是关键！改成 Kernel*.zip 表示只要是以 Kernel 开头的 zip 包全部上传
+        # 或者干脆改成 *.zip 也可以
+        path: Kernel*.zip
+        # 如果您担心找不到文件报错，可以加上这个参数让它别报错
+        if-no-files-found: warn
