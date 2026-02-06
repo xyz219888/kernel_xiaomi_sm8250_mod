@@ -261,18 +261,17 @@ fi
 
 echo -e "${G}🎉 Hook 注入全部完成！${N}"
 
-# ==================== [Step 3.5: 变量桥接与链接修复] ====================
+# ==================== [Step 3.5: 变量桥接与链接修复 (修复版)] ====================
 echo "🔧 [3.5/6] 正在执行变量桥接与冲突修复..."
 
-# 1. 强制 drivers/Makefile 包含 kernelsu (setup.sh 有时会漏)
+# 1. 强制 drivers/Makefile 包含 kernelsu
 DRIVERS_MAKEFILE="drivers/Makefile"
 if [ -f "$DRIVERS_MAKEFILE" ]; then
-    # 先删旧的防止重复
     sed -i '/kernelsu/d' "$DRIVERS_MAKEFILE"
     echo "obj-y += kernelsu/" >> "$DRIVERS_MAKEFILE"
 fi
 
-# 2. 桥接 Policydb (非GKI内核可能需要导出这些符号给模块用)
+# 2. 桥接 Policydb
 SERVICES_FILE="security/selinux/ss/services.c"
 if [ -f "$SERVICES_FILE" ]; then
     if ! grep -q "linux/export.h" "$SERVICES_FILE"; then
@@ -302,13 +301,12 @@ EOF
     fi
 fi
 
-# 4. 适配 rules.c (如果 SUSFS 或 KSU 需要访问内部 SELinux 结构)
+# 4. 适配 rules.c (修复参数报错)
 RULES_FILE="drivers/kernelsu/selinux/rules.c"
 if [ -f "$RULES_FILE" ]; then
-    # ReSukiSU 源码中 rules.c 可能已经适配，这里做防错检查
-    # 如果是软链接，sed -i 会修改源文件，这是预期的
-    echo "   -> 检查 drivers/kernelsu/selinux/rules.c 兼容性..."
-    # 尝试替换 get_policydb 实现，使其使用我们导出的指针
+    echo "   -> 修复 drivers/kernelsu/selinux/rules.c ..."
+    
+    # 替换 get_policydb 实现
     if grep -q "static struct policydb \*get_policydb(void)" "$RULES_FILE"; then
        sed -i '/static struct policydb \*get_policydb(void)/,/^}/c\
 extern struct policydb *ksu_policydb_ptr;\
@@ -318,6 +316,8 @@ static struct policydb *get_policydb(void)\
 }' "$RULES_FILE"
     fi
     
+    # 【修复重点】修正 reset_avc_cache 参数
+    # 将 selnl_notify_policyload(NULL, 0) 改为 selnl_notify_policyload(0)
     if grep -q "static void reset_avc_cache(void)" "$RULES_FILE"; then
         sed -i '/static void reset_avc_cache(void)/,/^}/c\
 extern struct selinux_avc *ksu_selinux_avc_ptr;\
@@ -325,13 +325,13 @@ extern int avc_ss_reset(struct selinux_avc *avc, u32 seqno);\
 static void reset_avc_cache(void)\
 {\
     avc_ss_reset(ksu_selinux_avc_ptr, 0);\
-    selnl_notify_policyload(NULL, 0);\
+    selnl_notify_policyload(0);\
     selinux_xfrm_notify_policyload();\
 }' "$RULES_FILE"
     fi
 fi
 
-echo "   ✅ 桥接与修复全部完成！"
+echo "   ✅ 桥接与修复全部完成！(已修正 rules.c 参数错误)"
 
 # ==================== [Step 4: ReSukiSU 源码适配] ====================
 echo "💉 [4/6] 执行 ReSukiSU 源码适配 (4.19 必需修复)..."
