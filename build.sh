@@ -128,8 +128,8 @@ echo "⬇️ [2/6] 下载 SukiSU & SUSFS..."
 curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch -q
 
-# ==================== [Step 3: 补丁应用 & 核心 Hook 注入 (GitHub Actions 专用版)] ====================
-echo "🔧 [3/6] 正在应用补丁与注入 Hook..."
+# ==================== [Step 3: 补丁应用 & Hook 注入 (SukiSU Ultra 源码专用版)] ====================
+echo "🔧 [3/6] 正在应用补丁与注入 Hook (基于源码修正)..."
 
 # --- 1. 应用 SUSFS 补丁 ---
 if [ -f "susfs.patch" ]; then
@@ -137,7 +137,7 @@ if [ -f "susfs.patch" ]; then
     patch -p1 --ignore-whitespace --fuzz=3 < susfs.patch || { echo "❌ 补丁应用失败"; exit 1; }
 fi
 
-# --- 2. 补全头文件 ---
+# --- 2. 补全头文件 (SUSFS 必需) ---
 if ! grep -q "susfs_task_state" include/linux/sched.h; then
     sed -i '/^	\/\* protection of the PI data mutex \*\//i \
 	#ifdef CONFIG_KSU\
@@ -154,89 +154,92 @@ fi
 # --- 3. 执行 Hook 注入 ---
 echo "   -> 正在注入 Manual Hook..."
 
-# [1] fs/read_write.c
+# [1] fs/read_write.c (Hook Read)
+# 🔥 修正：源码 ksud.c 里这个函数只有一个 fd 参数！不要传 buf 和 count！
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU\
 extern bool ksu_init_rc_hook;\
 extern void ksu_handle_sys_read(unsigned int fd);\
 #endif' fs/read_write.c
+
+# 注入位置：只传 fd
 sed -i '/^SYSCALL_DEFINE3(read,/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU\nif (unlikely(ksu_init_rc_hook)) ksu_handle_sys_read(fd);\n#endif/' fs/read_write.c
 
-# [2] fs/exec.c (execveat_ksud + &argv)
+
+# [2] fs/exec.c (Hook Exec)
+# 🔥 修正：源码 ksud.c 里函数名是 _ksud 后缀，参数是 user_arg_ptr
 sed -i '/#include <linux\/file.h>/a \
 #ifdef CONFIG_KSU\
 struct filename;\
 struct user_arg_ptr;\
 extern int ksu_handle_execveat_ksud(int *fd, struct filename **filename_ptr, struct user_arg_ptr *argv, struct user_arg_ptr *envp, int *flags);\
 #endif' fs/exec.c
+
+# 注入位置：保持不变，参数传递要严谨
 sed -i '/if (IS_ERR(filename))/i \
 #ifdef CONFIG_KSU\
 ksu_handle_execveat_ksud(\&fd, \&filename, \&argv, \&envp, \&flags);\
 #endif' fs/exec.c
 
-# [3] fs/open.c
+
+# [3] fs/open.c (Hook Faccessat)
+# 源码兼容性：通常 faccessat 没变，保持标准即可
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\
 #endif' fs/open.c
-sed -i '/if (mode & ~S_IRWXO)/i \
+
+sed -i '/return do_faccessat(dfd, filename, mode);/i \
 #ifdef CONFIG_KSU\
 ksu_handle_faccessat(\&dfd, \&filename, \&mode, NULL);\
 #endif' fs/open.c
 
-# [4] fs/stat.c
+
+# [4] fs/stat.c (Hook Stat)
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\
 extern void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr);\
 #endif' fs/stat.c
-sed -i '/if ((flags & ~(AT_SYMLINK_NOFOLLOW/i \
+
+sed -i '/error = vfs_fstatat(dfd, filename, &stat, flag);/i \
 #ifdef CONFIG_KSU\
-ksu_handle_stat(\&dfd, \&filename, \&flags);\
+ksu_handle_stat(\&dfd, \&filename, \&flag);\
 #endif' fs/stat.c
+
 sed -i '/fdput(f);/i \
 #ifdef CONFIG_KSU\
 if (!error) ksu_handle_vfs_fstat(fd, \&stat->size);\
 #endif' fs/stat.c
 
-# [5] drivers/input/input.c
+
+# [5] drivers/input/input.c (Hook Input)
 sed -i '/#include <linux\/input\/mt.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\
 #endif' drivers/input/input.c
-sed -i '/if (is_event_supported(type, dev->evbit, EV_MAX))/i \
+
+sed -i '/spin_lock_irqsave(&dev->event_lock, flags);/i \
 #ifdef CONFIG_KSU\
 ksu_handle_input_handle_event(\&type, \&code, \&value);\
 #endif' drivers/input/input.c
 
-# [6] kernel/reboot.c
-sed -i '/#include <linux\/syscalls.h>/a \
-#ifdef CONFIG_KSU\
-extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\
-#endif' kernel/reboot.c
-sed -i '/if (check_poweroff_charger_mode())/i \
-#ifdef CONFIG_KSU\
-ksu_handle_sys_reboot(magic1, magic2, cmd, \&arg);\
-#endif' kernel/reboot.c
 
-# [7] kernel/sys.c (🔥 终极修正：利用 ksuid 锚点精准定位)
-# 这行代码保证一定是插在 sys_setresuid 里，且在变量声明之后
+# [6] kernel/sys.c (Root Hook)
 if [ -f "kernel/sys.c" ]; then
-    echo "   -> 正在注入 kernel/sys.c (精准锚点版)..."
+    echo "   -> 正在注入 kernel/sys.c (官方文档版)..."
     sed -i '/#include <linux\/syscalls.h>/a \
 #ifdef CONFIG_KSU\
 extern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);\
 #endif' kernel/sys.c
 
-    # 使用 'ksuid = make_kuid' 作为锚点，这是 setresuid 独有的！
     sed -i '/ksuid = make_kuid(ns, suid);/i \
 #ifdef CONFIG_KSU\
     ksu_handle_setresuid(ruid, euid, suid);\
 #endif' kernel/sys.c
 fi
 
-echo "   ✅ 8核心文件 Hook 注入完成！"
-
+echo "   ✅ Hook 注入完成！(已校准 SukiSU Ultra 源码)"
 
 # ==================== [Step 3.5: 变量桥接与链接修复] ====================
 echo "🔧 [3.5/6] 正在执行变量桥接与冲突修复..."
@@ -323,65 +326,52 @@ fi
 
 echo "   ✅ 桥接与修复全部完成！"
 
-# ==================== [Step 4: SukiSU 源码适配 (智能双模版)] ====================
-echo "💉 [4/6] 执行 SukiSU 源码适配 (联网优先 -> 失败自动切换 40513)..."
+# ==================== [Step 4: SukiSU 源码适配 (官方纯净版)] ====================
+echo "💉 [4/6] 执行 SukiSU 源码适配 (官方逻辑 + 4.19 必需修复)..."
 
 # 目标文件
 KBUILD_FILE="drivers/kernelsu/Kbuild"
 
-# 1. 配置版本号逻辑 (不破坏官方文件，只改备胎)
 if [ ! -f "$KBUILD_FILE" ]; then
-    echo "   ⚠️ 官方 Kbuild 丢失，尝试恢复..."
-    # 如果文件没了，就只能手写一个保底的 (通常不会走到这一步)
-    mkdir -p drivers/kernelsu
-    echo "ccflags-y += -DKSU_VERSION=40513" > drivers/kernelsu/Makefile
-    echo "obj-y += ksu_core.o" >> drivers/kernelsu/Makefile
-else
-    echo "   -> 正在配置版本号策略..."
-
-    # 【关键操作 A】: 修改保底版本号 (Failover)
-    # 官方代码逻辑: ifeq ($(KSU_GITHUB_VERSION),) -> KSU_VERSION := 13000
-    # 我们改成: -> KSU_VERSION := 40513
-    # 效果: 有网时用网，没网时用 40513。
-    sed -i 's/KSU_VERSION := 13000/KSU_VERSION := 40513/g' "$KBUILD_FILE"
-    
-    # 把保底的版本名也改得好听点
-    sed -i 's/unknown@unknown/v4.1.0-SukiSU-Fallback-v40513/g' "$KBUILD_FILE"
-
-    # 【关键操作 B】: 补充防报错参数 (这些是为了编译通过，不影响版本号)
-    if ! grep -q "-Wno-implicit-function-declaration" "$KBUILD_FILE"; then
-        echo "ccflags-y += -Wno-implicit-function-declaration -Wno-strict-prototypes -Wno-int-to-pointer-cast -Wno-unused-function -Wno-unused-variable -Wno-missing-braces -Wno-declaration-after-statement" >> "$KBUILD_FILE"
-    fi
-
-    # 【关键操作 C】: 强制开启 SUSFS (防止 .config 没开)
-    if ! grep -q "CONFIG_KSU_SUSFS" "$KBUILD_FILE"; then
-         echo "ccflags-y += -DCONFIG_KSU_SUSFS -DCONFIG_KSU_SUSFS_SUS_PATH -DCONFIG_KSU_SUSFS_SUS_MOUNT" >> "$KBUILD_FILE"
-    fi
+    echo "   ❌ 错误：SukiSU 源码未找到！"
+    exit 1
 fi
 
-# 2. 确保 Makefile 存在
+echo "   -> 配置构建参数..."
+# 【1】开启 SUSFS (必须)
+if ! grep -q "CONFIG_KSU_SUSFS" "$KBUILD_FILE"; then
+     echo "ccflags-y += -DCONFIG_KSU_SUSFS -DCONFIG_KSU_SUSFS_SUS_PATH -DCONFIG_KSU_SUSFS_SUS_MOUNT" >> "$KBUILD_FILE"
+fi
+
+# 【2】添加 4.19 防报错参数 (必须)
+if ! grep -q "-Wno-implicit-function-declaration" "$KBUILD_FILE"; then
+    echo "ccflags-y += -Wno-implicit-function-declaration -Wno-strict-prototypes -Wno-int-to-pointer-cast -Wno-unused-function -Wno-unused-variable -Wno-missing-braces -Wno-declaration-after-statement" >> "$KBUILD_FILE"
+fi
+
+# 确保 Makefile 存在
 if [ ! -f "drivers/kernelsu/Makefile" ]; then
     echo "obj-y += ksu_core.o" > drivers/kernelsu/Makefile
 fi
 
-# 3. 【必选修复】4.19 内核兼容性补丁 (这些绝对不能删！)
-echo "   -> 正在应用 4.19 内核兼容性修复..."
+# 【3】4.19 兼容性修复 (必选)
+echo "   -> 应用 4.19 兼容性补丁..."
 
-# [修复 1] 补全 SELinux 声明 (解决 policydb 未定义报错)
+# [修复 1] 补全 SELinux 声明
 sed -i '1i\
 extern struct policydb policydb;\
 extern struct selinux_state selinux_state;' drivers/kernelsu/selinux/rules.c
 
-# [修复 2] 修正函数调用参数 (解决 too few arguments 报错)
+# [修复 2] 修正函数调用参数
 sed -i 's/selinux_status_update_policyload(0);/selinux_status_update_policyload(\&selinux_state, 0);/g' drivers/kernelsu/selinux/rules.c
 
-# [修复 3] 补全 selinux_enforcing 声明 (配合开关控制)
+# [修复 3] 补全 selinux_enforcing 声明
 sed -i '1i\extern int selinux_enforcing;' drivers/kernelsu/selinux/selinux_defs.h
 
-# [修复 4] 屏蔽 current_sid 冲突 (防止重复定义)
-sed -i 's/static inline u32 current_sid(void)/static inline u32 __ksu_ignored_current_sid(void)/' drivers/kernelsu/selinux/selinux_defs.h
+# [修复 4] 智能解决 current_sid 冲突 (宏隔离)
+sed -i '/static inline u32 current_sid(void)/i #ifndef CONFIG_KSU_COMPAT_HAS_CURRENT_SID' drivers/kernelsu/selinux/selinux_defs.h
+sed -i '/return sec->sid;/!b;n;a #endif' drivers/kernelsu/selinux/selinux_defs.h
 
-echo "   ✅ SukiSU 适配完成！(已启用智能联网模式)"
+echo "   ✅ SukiSU 适配完成！"
 
 # ==================== [Step 5: MIUI DTS & Config] ====================
 echo "⚙️ [5/6] 执行 MIUI 深度适配..."
