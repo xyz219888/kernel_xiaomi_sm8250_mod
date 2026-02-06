@@ -323,44 +323,65 @@ fi
 
 echo "   ✅ 桥接与修复全部完成！"
 
-# ==================== [Step 4: SukiSU 源码适配 (修复版)] ====================
-echo "💉 [4/6] 执行 SukiSU 源码适配..."
+# ==================== [Step 4: SukiSU 源码适配 (智能双模版)] ====================
+echo "💉 [4/6] 执行 SukiSU 源码适配 (联网优先 -> 失败自动切换 40513)..."
 
-# 1. 生成 Makefile
-rm -f drivers/kernelsu/Kbuild
-cat > drivers/kernelsu/Makefile <<'EOF'
-ccflags-y += -DKSU_VERSION=11999 -DKSU_VERSION_FULL=\"v1.0.0-SUKISU-Custom\"
-ccflags-y += -Wno-implicit-function-declaration -Wno-strict-prototypes -Wno-int-to-pointer-cast -Wno-unused-function -Wno-unused-variable -Wno-missing-braces -Wno-declaration-after-statement
-ccflags-y += -I$(src)/include -DCONFIG_KSU_SUSFS -DCONFIG_KSU_SUSFS_SUS_PATH -DCONFIG_KSU_SUSFS_SUS_MOUNT
-ccflags-y += -DKSU_COMPAT_HAS_CURRENT_SID
-ccflags-y += -I$(srctree)/security/selinux -I$(srctree)/security/selinux/include -I$(objtree)/security/selinux
-ccflags-y += -include $(srctree)/include/uapi/asm-generic/errno.h
-obj-y += ksu_core.o
-ksu_core-y := ksuinit.o allowlist.o app_profile.o apk_sign.o sucompat.o \
-              throne_tracker.o setuid_hook.o kernel_compat.o kernel_umount.o \
-              supercalls.o feature.o ksud.o seccomp_cache.o file_wrapper.o \
-              su_mount_ns.o shim.o tiny_sulog.o \
-              selinux/selinux.o selinux/sepolicy.o selinux/rules.o
-obj-$(CONFIG_KSU_MANUAL_SU) += manual_su.o
-obj-$(CONFIG_KPM) += kpm/
-EOF
+# 目标文件
+KBUILD_FILE="drivers/kernelsu/Kbuild"
 
-# 2. [修复] 补全 SELinux 声明 (解决 policydb 未定义)
+# 1. 配置版本号逻辑 (不破坏官方文件，只改备胎)
+if [ ! -f "$KBUILD_FILE" ]; then
+    echo "   ⚠️ 官方 Kbuild 丢失，尝试恢复..."
+    # 如果文件没了，就只能手写一个保底的 (通常不会走到这一步)
+    mkdir -p drivers/kernelsu
+    echo "ccflags-y += -DKSU_VERSION=40513" > drivers/kernelsu/Makefile
+    echo "obj-y += ksu_core.o" >> drivers/kernelsu/Makefile
+else
+    echo "   -> 正在配置版本号策略..."
+
+    # 【关键操作 A】: 修改保底版本号 (Failover)
+    # 官方代码逻辑: ifeq ($(KSU_GITHUB_VERSION),) -> KSU_VERSION := 13000
+    # 我们改成: -> KSU_VERSION := 40513
+    # 效果: 有网时用网，没网时用 40513。
+    sed -i 's/KSU_VERSION := 13000/KSU_VERSION := 40513/g' "$KBUILD_FILE"
+    
+    # 把保底的版本名也改得好听点
+    sed -i 's/unknown@unknown/v4.1.0-SukiSU-Fallback-v40513/g' "$KBUILD_FILE"
+
+    # 【关键操作 B】: 补充防报错参数 (这些是为了编译通过，不影响版本号)
+    if ! grep -q "-Wno-implicit-function-declaration" "$KBUILD_FILE"; then
+        echo "ccflags-y += -Wno-implicit-function-declaration -Wno-strict-prototypes -Wno-int-to-pointer-cast -Wno-unused-function -Wno-unused-variable -Wno-missing-braces -Wno-declaration-after-statement" >> "$KBUILD_FILE"
+    fi
+
+    # 【关键操作 C】: 强制开启 SUSFS (防止 .config 没开)
+    if ! grep -q "CONFIG_KSU_SUSFS" "$KBUILD_FILE"; then
+         echo "ccflags-y += -DCONFIG_KSU_SUSFS -DCONFIG_KSU_SUSFS_SUS_PATH -DCONFIG_KSU_SUSFS_SUS_MOUNT" >> "$KBUILD_FILE"
+    fi
+fi
+
+# 2. 确保 Makefile 存在
+if [ ! -f "drivers/kernelsu/Makefile" ]; then
+    echo "obj-y += ksu_core.o" > drivers/kernelsu/Makefile
+fi
+
+# 3. 【必选修复】4.19 内核兼容性补丁 (这些绝对不能删！)
+echo "   -> 正在应用 4.19 内核兼容性修复..."
+
+# [修复 1] 补全 SELinux 声明 (解决 policydb 未定义报错)
 sed -i '1i\
 extern struct policydb policydb;\
 extern struct selinux_state selinux_state;' drivers/kernelsu/selinux/rules.c
 
-# 3. [修复] 修正函数调用参数 (解决 too few arguments)
-# 将 selinux_status_update_policyload(0) 改为传入 &selinux_state
+# [修复 2] 修正函数调用参数 (解决 too few arguments 报错)
 sed -i 's/selinux_status_update_policyload(0);/selinux_status_update_policyload(\&selinux_state, 0);/g' drivers/kernelsu/selinux/rules.c
 
-# 4. [修复] 补全 selinux_enforcing 声明
+# [修复 3] 补全 selinux_enforcing 声明 (配合开关控制)
 sed -i '1i\extern int selinux_enforcing;' drivers/kernelsu/selinux/selinux_defs.h
 
-# 5. 屏蔽 current_sid 冲突
+# [修复 4] 屏蔽 current_sid 冲突 (防止重复定义)
 sed -i 's/static inline u32 current_sid(void)/static inline u32 __ksu_ignored_current_sid(void)/' drivers/kernelsu/selinux/selinux_defs.h
 
-echo "   ✅ SukiSU 源码适配完成！"
+echo "   ✅ SukiSU 适配完成！(已启用智能联网模式)"
 
 # ==================== [Step 5: MIUI DTS & Config] ====================
 echo "⚙️ [5/6] 执行 MIUI 深度适配..."
