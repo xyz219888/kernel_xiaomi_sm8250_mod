@@ -128,8 +128,8 @@ echo "⬇️ [2/6] 下载 SukiSU & SUSFS..."
 curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch -q
 
-# ==================== [Step 3: 补丁应用 & Hook 注入 (SukiSU Ultra 源码专用版)] ====================
-echo "🔧 [3/6] 正在应用补丁与注入 Hook (基于源码修正)..."
+# ==================== [Step 3: 补丁应用 & Hook 注入 (Input 修复版)] ====================
+echo "🔧 [3/6] 正在应用补丁与注入 Hook (修复 Input 编译错误)..."
 
 # --- 1. 应用 SUSFS 补丁 ---
 if [ -f "susfs.patch" ]; then
@@ -155,91 +155,82 @@ fi
 echo "   -> 正在注入 Manual Hook..."
 
 # [1] fs/read_write.c (Hook Read)
-# 🔥 修正：源码 ksud.c 里这个函数只有一个 fd 参数！不要传 buf 和 count！
 sed -i '/#include <linux\/fs.h>/a \
-#ifdef CONFIG_KSU\
-extern bool ksu_init_rc_hook;\
-extern void ksu_handle_sys_read(unsigned int fd);\
+#ifdef CONFIG_KSU_MANUAL_HOOK\
+extern bool ksu_init_rc_hook __read_mostly;\
+extern int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr);\
 #endif' fs/read_write.c
 
-# 注入位置：只传 fd
-sed -i '/^SYSCALL_DEFINE3(read,/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU\nif (unlikely(ksu_init_rc_hook)) ksu_handle_sys_read(fd);\n#endif/' fs/read_write.c
+sed -i '/^SYSCALL_DEFINE3(read,/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU_MANUAL_HOOK\nif (unlikely(ksu_init_rc_hook)) ksu_handle_sys_read(fd, \&buf, \&count);\n#endif/' fs/read_write.c
 
-
-# [2] fs/exec.c (Hook Exec)
-# 🔥 修正：源码 ksud.c 里函数名是 _ksud 后缀，参数是 user_arg_ptr
+# [2] fs/exec.c (Hook Exec - 修正函数名和参数)
 sed -i '/#include <linux\/file.h>/a \
-#ifdef CONFIG_KSU\
-struct filename;\
-struct user_arg_ptr;\
-extern int ksu_handle_execveat_ksud(int *fd, struct filename **filename_ptr, struct user_arg_ptr *argv, struct user_arg_ptr *envp, int *flags);\
+#ifdef CONFIG_KSU_MANUAL_HOOK\
+extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\
 #endif' fs/exec.c
 
-# 注入位置：保持不变，参数传递要严谨
 sed -i '/if (IS_ERR(filename))/i \
-#ifdef CONFIG_KSU\
-ksu_handle_execveat_ksud(\&fd, \&filename, \&argv, \&envp, \&flags);\
+#ifdef CONFIG_KSU_MANUAL_HOOK\
+ksu_handle_execveat(\&fd, \&filename, \&argv, \&envp, \&flags);\
 #endif' fs/exec.c
-
 
 # [3] fs/open.c (Hook Faccessat)
-# 源码兼容性：通常 faccessat 没变，保持标准即可
 sed -i '/#include <linux\/fs.h>/a \
-#ifdef CONFIG_KSU\
+#ifdef CONFIG_KSU_MANUAL_HOOK\
 extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\
 #endif' fs/open.c
 
 sed -i '/return do_faccessat(dfd, filename, mode);/i \
-#ifdef CONFIG_KSU\
+#ifdef CONFIG_KSU_MANUAL_HOOK\
 ksu_handle_faccessat(\&dfd, \&filename, \&mode, NULL);\
 #endif' fs/open.c
 
-
 # [4] fs/stat.c (Hook Stat)
 sed -i '/#include <linux\/fs.h>/a \
-#ifdef CONFIG_KSU\
+#ifdef CONFIG_KSU_MANUAL_HOOK\
 extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\
 extern void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr);\
 #endif' fs/stat.c
 
 sed -i '/error = vfs_fstatat(dfd, filename, &stat, flag);/i \
-#ifdef CONFIG_KSU\
+#ifdef CONFIG_KSU_MANUAL_HOOK\
 ksu_handle_stat(\&dfd, \&filename, \&flag);\
 #endif' fs/stat.c
 
 sed -i '/fdput(f);/i \
-#ifdef CONFIG_KSU\
+#ifdef CONFIG_KSU_MANUAL_HOOK\
 if (!error) ksu_handle_vfs_fstat(fd, \&stat->size);\
 #endif' fs/stat.c
 
-
-# [5] drivers/input/input.c (Hook Input)
+# [5] drivers/input/input.c (🔥 关键修正：换唯一锚点)
+# 注入头文件声明
 sed -i '/#include <linux\/input\/mt.h>/a \
-#ifdef CONFIG_KSU\
+#ifdef CONFIG_KSU_MANUAL_HOOK\
+extern bool ksu_input_hook __read_mostly;\
 extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\
 #endif' drivers/input/input.c
 
-sed -i '/spin_lock_irqsave(&dev->event_lock, flags);/i \
-#ifdef CONFIG_KSU\
-ksu_handle_input_handle_event(\&type, \&code, \&value);\
+# 注入调用逻辑：只在 is_event_supported 前面插，这行全文件唯一！
+sed -i '/if (is_event_supported(type, dev->evbit, EV_MAX))/i \
+#ifdef CONFIG_KSU_MANUAL_HOOK\
+if (unlikely(ksu_input_hook)) ksu_handle_input_handle_event(\&type, \&code, \&value);\
 #endif' drivers/input/input.c
-
 
 # [6] kernel/sys.c (Root Hook)
 if [ -f "kernel/sys.c" ]; then
-    echo "   -> 正在注入 kernel/sys.c (官方文档版)..."
+    echo "   -> 正在注入 kernel/sys.c..."
     sed -i '/#include <linux\/syscalls.h>/a \
-#ifdef CONFIG_KSU\
+#ifdef CONFIG_KSU_MANUAL_HOOK\
 extern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);\
 #endif' kernel/sys.c
 
     sed -i '/ksuid = make_kuid(ns, suid);/i \
-#ifdef CONFIG_KSU\
-    ksu_handle_setresuid(ruid, euid, suid);\
+#ifdef CONFIG_KSU_MANUAL_HOOK\
+    (void)ksu_handle_setresuid(ruid, euid, suid);\
 #endif' kernel/sys.c
 fi
 
-echo "   ✅ Hook 注入完成！(已校准 SukiSU Ultra 源码)"
+echo "   ✅ Hook 注入完成！(已修复 Input 报错)"
 
 # ==================== [Step 3.5: 变量桥接与链接修复] ====================
 echo "🔧 [3.5/6] 正在执行变量桥接与冲突修复..."
