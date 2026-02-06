@@ -128,10 +128,18 @@ echo "⬇️ [2/6] 下载 SukiSU & SUSFS..."
 curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch -q
 
-# ==================== [Step 3: Hook 注入 (源码级完美修正版)] ====================
-echo "🔧 [3/6] 正在应用补丁与注入 Hook (基于 SukiSU 源码深度校准)..."
+# ==================== [Step 3: Hook 注入 (彩色中文调试版)] ====================
+# 定义颜色代码
+R='\033[0;31m'   # 红
+G='\033[0;32m'   # 绿
+Y='\033[1;33m'   # 黄
+B='\033[0;34m'   # 蓝
+N='\033[0m'      # 清除
 
-# --- 0. 紧急清洗 (防止之前脚本的残留) ---
+echo -e "${B}🔧 [3/6] 正在执行 Hook 注入 (启用彩色中文调试模式)...${N}"
+
+# --- 0. 战场打扫 (清理可能存在的错误代码) ---
+echo -e "${Y}   -> [清理] 正在移除旧的 Input 钩子残留...${N}"
 if [ -f "drivers/input/input.c" ]; then
     sed -i '/ksu_handle_input_handle_event/d' drivers/input/input.c
     sed -i '/ksu_input_hook/d' drivers/input/input.c
@@ -139,8 +147,13 @@ fi
 
 # --- 1. 应用 SUSFS 补丁 ---
 if [ -f "susfs.patch" ]; then
-    echo "   -> 正在应用 susfs.patch..."
-    patch -p1 --ignore-whitespace --fuzz=3 -N < susfs.patch || echo "   ⚠️ 补丁可能已应用"
+    echo -e "${B}   -> [补丁] 正在应用 SUSFS 补丁...${N}"
+    patch -p1 --ignore-whitespace --fuzz=3 -N < susfs.patch >/dev/null 2>&1
+    if [ $? -eq 0 ]; then
+        echo -e "${G}      ✅ SUSFS 补丁应用成功${N}"
+    else
+        echo -e "${Y}      ⚠️ SUSFS 补丁可能已应用或有冲突 (尝试跳过)${N}"
+    fi
 fi
 
 # --- 2. 补全头文件 ---
@@ -157,96 +170,131 @@ if ! grep -q "INODE_STATE_SUS_KSTAT" include/linux/fs.h; then
 #endif' include/linux/fs.h
 fi
 
-# --- 3. 执行 Hook 注入 (源码实战版) ---
-echo "   -> 正在注入 Manual Hook..."
+# --- 3. 执行 Hook 注入 (精准制导) ---
+echo -e "${B}   -> [注入] 开始注入核心钩子...${N}"
 
 # [1] fs/read_write.c (Hook Read)
-# 🔥 修正：源码 ksud.c 只定义了 void ksu_handle_sys_read(unsigned int fd);
+echo -ne "      Processed fs/read_write.c ... "
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 extern bool ksu_init_rc_hook __read_mostly;\
 extern void ksu_handle_sys_read(unsigned int fd);\
 #endif' fs/read_write.c
-
-# 注入位置：只传 fd，绝对不要传 buf 和 count！
 sed -i '/^SYSCALL_DEFINE3(read,/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU_MANUAL_HOOK\nif (unlikely(ksu_init_rc_hook)) ksu_handle_sys_read(fd);\n#endif/' fs/read_write.c
+echo -e "${G}OK${N}"
 
-
-# [2] fs/exec.c (Hook Exec)
-# 🔥 修正：1.补全 struct 声明 2.使用 _ksud 后缀 3.参数类型对齐
+# [2] fs/exec.c (Hook Exec - 源码适配版)
+echo -ne "      Processed fs/exec.c ... "
 sed -i '/#include <linux\/file.h>/a \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 struct filename;\
 struct user_arg_ptr;\
 extern int ksu_handle_execveat_ksud(int *fd, struct filename **filename_ptr, struct user_arg_ptr *argv, struct user_arg_ptr *envp, int *flags);\
 #endif' fs/exec.c
-
-# 注入位置：参数必须取地址传递
 sed -i '/if (IS_ERR(filename))/i \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 ksu_handle_execveat_ksud(\&fd, \&filename, \&argv, \&envp, \&flags);\
 #endif' fs/exec.c
-
+echo -e "${G}OK${N}"
 
 # [3] fs/open.c (Hook Faccessat)
+echo -ne "      Processed fs/open.c ... "
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\
 #endif' fs/open.c
-
 sed -i '/return do_faccessat(dfd, filename, mode);/i \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 ksu_handle_faccessat(\&dfd, \&filename, \&mode, NULL);\
 #endif' fs/open.c
-
+echo -e "${G}OK${N}"
 
 # [4] fs/stat.c (Hook Stat)
+echo -ne "      Processed fs/stat.c ... "
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\
 extern void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr);\
 #endif' fs/stat.c
-
 sed -i '/error = vfs_fstatat(dfd, filename, &stat, flag);/i \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 ksu_handle_stat(\&dfd, \&filename, \&flag);\
 #endif' fs/stat.c
-
 sed -i '/fdput(f);/i \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 if (!error) ksu_handle_vfs_fstat(fd, \&stat->size);\
 #endif' fs/stat.c
+echo -e "${G}OK${N}"
 
-
-# [5] drivers/input/input.c (Hook Input)
-# 🔥 修正：使用唯一锚点 is_event_supported，防止插错位置
+# [5] drivers/input/input.c (Hook Input - 唯一锚点)
+echo -ne "      Processed drivers/input/input.c ... "
 sed -i '/#include <linux\/input\/mt.h>/a \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 extern bool ksu_input_hook __read_mostly;\
 extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\
 #endif' drivers/input/input.c
-
 sed -i '/if (is_event_supported(type, dev->evbit, EV_MAX))/i \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 if (unlikely(ksu_input_hook)) ksu_handle_input_handle_event(\&type, \&code, \&value);\
 #endif' drivers/input/input.c
+echo -e "${G}OK${N}"
 
+# [6] kernel/sys.c (🔥 Root 提权钩子 - 终极核查)
+echo -e "${Y}   -> [重点] 正在处理 kernel/sys.c (Root 权限核心)...${N}"
+TARGET_FILE="kernel/sys.c"
 
-# [6] kernel/sys.c (Root Hook)
-if [ -f "kernel/sys.c" ]; then
-    echo "   -> 正在注入 kernel/sys.c..."
-    sed -i '/#include <linux\/syscalls.h>/a \
-#ifdef CONFIG_KSU_MANUAL_HOOK\
-extern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);\
-#endif' kernel/sys.c
-
-    sed -i '/ksuid = make_kuid(ns, suid);/i \
-#ifdef CONFIG_KSU_MANUAL_HOOK\
-    (void)ksu_handle_setresuid(ruid, euid, suid);\
-#endif' kernel/sys.c
+if [ ! -f "$TARGET_FILE" ]; then
+    echo -e "${R}❌ 致命错误：找不到 $TARGET_FILE 文件！${N}"
+    exit 1
 fi
 
-echo "   ✅ Hook 注入完成！(已修复所有定义冲突)"
+# 1. 注入函数声明
+sed -i '/#include <linux\/syscalls.h>/a \
+#ifdef CONFIG_KSU_MANUAL_HOOK\
+extern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);\
+#endif' "$TARGET_FILE"
+
+# 2. 寻找注入锚点 (双保险逻辑)
+# 方案 A: 找 make_kuid (标准位置)
+ANCHOR_A="ksuid[[:space:]]*=[[:space:]]*make_kuid"
+# 方案 B: 找函数头 (备用位置，插在变量定义之后)
+ANCHOR_B="long[[:space:]]*__sys_setresuid"
+
+echo -e "${B}      正在搜索注入锚点...${N}"
+
+if grep -qE "$ANCHOR_A" "$TARGET_FILE"; then
+    echo -e "${G}      ✅ 方案A: 找到 'make_kuid'，正在注入...${N}"
+    # 注入带有中文日志的代码
+    sed -i '/ksuid[[:space:]]*=[[:space:]]*make_kuid/i \
+#ifdef CONFIG_KSU_MANUAL_HOOK\
+    pr_info("SukiSU_DEBUG: Root请求已拦截! UID: %d\\n", suid);\
+    (void)ksu_handle_setresuid(ruid, euid, suid);\
+#endif' "$TARGET_FILE"
+
+elif grep -qE "$ANCHOR_B" "$TARGET_FILE"; then
+    echo -e "${Y}      ⚠️ 方案A失败，切换方案B: 注入函数头部...${N}"
+    # 在函数名定义后的大括号里注入
+    sed -i '/long[[:space:]]*__sys_setresuid/,/{/ s/{/{ \n#ifdef CONFIG_KSU_MANUAL_HOOK\n    pr_info("SukiSU_DEBUG: Root请求(方案B)已拦截! UID: %d\\n", suid);\n    (void)ksu_handle_setresuid(ruid, euid, suid);\n#endif/' "$TARGET_FILE"
+
+else
+    echo -e "${R}❌ 严重失败：无法在 sys.c 中找到任何有效的注入位置！${N}"
+    echo -e "${R}      请检查源码是否被大幅修改。${N}"
+    exit 1
+fi
+
+# 3. 最终核查 (把注入结果打印给你看)
+echo -e "${B}      正在核查注入结果...${N}"
+if grep -q "SukiSU_DEBUG" "$TARGET_FILE"; then
+    echo -e "${G}      ✅ 注入确认成功！以下是代码片段：${N}"
+    echo "----------------------------------------------------"
+    grep -C 3 "SukiSU_DEBUG" "$TARGET_FILE" --color=always
+    echo "----------------------------------------------------"
+else
+    echo -e "${R}❌ 核查失败：代码似乎没有写入文件！请检查 sed 命令。${N}"
+    exit 1
+fi
+
+echo -e "${G}🎉 Hook 注入全部完成！(已启用详细中文调试日志)${N}"
 
 
 # ==================== [Step 3.5: 变量桥接与链接修复] ====================
