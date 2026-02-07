@@ -352,8 +352,8 @@ fi
 
 echo "   ✅ 桥接与修复全部完成！(已修正 rules.c 参数错误)"
 
-# ==================== [Step 4: ReSukiSU 源码适配 (强制 Manual Hook)] ====================
-echo "💉 [4/6] 执行 ReSukiSU 源码适配 (强制 Manual Hook 模式)..."
+# ==================== [Step 4: ReSukiSU 源码适配 (完美逻辑版)] ====================
+echo "💉 [4/6] 执行 ReSukiSU 源码适配 (智能追加模式)..."
 
 KBUILD_FILE="drivers/kernelsu/Kbuild"
 # 确保 Kbuild 存在
@@ -362,36 +362,41 @@ if [ ! -f "$KBUILD_FILE" ]; then
     exit 1
 fi
 
-echo "   -> 配置构建参数..."
+echo "   -> 检查并配置构建参数..."
 
-# 【1】强制定义 SUSFS_MANUAL_HOOK
-# 这是一个关键修改：告诉 ReSukiSU 不要用 Inline Hook，而是等待手动调用
-if grep -q "CONFIG_KSU_SUSFS" "$KBUILD_FILE"; then
-     # 先清理旧的定义
-     sed -i '/CONFIG_KSU_SUSFS/d' "$KBUILD_FILE"
-fi
+# 【1】配置 SUSFS Manual Hook (带防重复检查)
+# 只有当文件中还没定义 CONFIG_KSU_SUSFS_MANUAL_HOOK 时才追加
+# 这样既不会报错，也不会因为重复运行而无限追加
+if ! grep -q "CONFIG_KSU_SUSFS_MANUAL_HOOK" "$KBUILD_FILE"; then
+    echo "   -> 追加 SUSFS Manual Hook 配置..."
+    cat >> "$KBUILD_FILE" <<EOF
 
-# 重新写入完整的 SUSFS 配置 (启用 Manual Hook)
-cat >> "$KBUILD_FILE" <<EOF
+# --- Added by build script for SUSFS Manual Hook ---
 ccflags-y += -DCONFIG_KSU_SUSFS
 ccflags-y += -DCONFIG_KSU_SUSFS_SUS_PATH
 ccflags-y += -DCONFIG_KSU_SUSFS_SUS_MOUNT
 ccflags-y += -DCONFIG_KSU_SUSFS_MANUAL_HOOK
 ccflags-y += -DCONFIG_KSU_SUSFS_TRY_UMOUNT
 EOF
-
-# 【2】添加 4.19 防报错参数
-if ! grep -q "-Wno-implicit-function-declaration" "$KBUILD_FILE"; then
-    echo "ccflags-y += -Wno-implicit-function-declaration -Wno-strict-prototypes -Wno-int-to-pointer-cast -Wno-unused-function -Wno-unused-variable -Wno-missing-braces -Wno-declaration-after-statement" >> "$KBUILD_FILE"
+else
+    echo "   -> SUSFS Manual Hook 配置已存在，跳过追加。"
 fi
 
-# 确保 Makefile 存在
+# 【2】添加 4.19 防报错参数 (带防重复检查)
+# 只有当文件中没有这些参数时才添加
+if ! grep -q "Wno-implicit-function-declaration" "$KBUILD_FILE"; then
+    echo "   -> 追加编译器防报错参数..."
+    echo "ccflags-y += -Wno-implicit-function-declaration -Wno-strict-prototypes -Wno-int-to-pointer-cast -Wno-unused-function -Wno-unused-variable" >> "$KBUILD_FILE"
+else
+    echo "   -> 防报错参数已存在，跳过。"
+fi
+
+# 【3】确保 Makefile 存在
 if [ ! -f "drivers/kernelsu/Makefile" ]; then
     echo "obj-y += ksu_core.o" > drivers/kernelsu/Makefile
 fi
 
 echo "   ✅ ReSukiSU 适配完成！"
-
 # ==================== [Step 5: MIUI DTS & Config] ====================
 echo "⚙️ [5/6] 执行 MIUI 深度适配 (完整保留)..."
 
