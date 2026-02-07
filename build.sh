@@ -333,23 +333,35 @@ fi
 
 echo "   ✅ 桥接与修复全部完成！(已修正 rules.c 参数错误)"
 
-# ==================== [Step 4: ReSukiSU 源码适配] ====================
-echo "💉 [4/6] 执行 ReSukiSU 源码适配 (4.19 必需修复)..."
+# ==================== [Step 4: ReSukiSU 源码适配 (强制 Manual Hook)] ====================
+echo "💉 [4/6] 执行 ReSukiSU 源码适配 (强制 Manual Hook 模式)..."
 
 KBUILD_FILE="drivers/kernelsu/Kbuild"
-# 确保 Kbuild 存在 (如果是软链接，setup.sh 应已处理)
+# 确保 Kbuild 存在
 if [ ! -f "$KBUILD_FILE" ]; then
     echo "   ❌ 错误：ReSukiSU 源码未找到！"
     exit 1
 fi
 
 echo "   -> 配置构建参数..."
-# 【1】开启 SUSFS (如果需要)
-if ! grep -q "CONFIG_KSU_SUSFS" "$KBUILD_FILE"; then
-     echo "ccflags-y += -DCONFIG_KSU_SUSFS -DCONFIG_KSU_SUSFS_SUS_PATH -DCONFIG_KSU_SUSFS_SUS_MOUNT" >> "$KBUILD_FILE"
+
+# 【1】强制定义 SUSFS_MANUAL_HOOK
+# 这是一个关键修改：告诉 ReSukiSU 不要用 Inline Hook，而是等待手动调用
+if grep -q "CONFIG_KSU_SUSFS" "$KBUILD_FILE"; then
+     # 先清理旧的定义
+     sed -i '/CONFIG_KSU_SUSFS/d' "$KBUILD_FILE"
 fi
 
-# 【2】添加 4.19 防报错参数 (必须)
+# 重新写入完整的 SUSFS 配置 (启用 Manual Hook)
+cat >> "$KBUILD_FILE" <<EOF
+ccflags-y += -DCONFIG_KSU_SUSFS
+ccflags-y += -DCONFIG_KSU_SUSFS_SUS_PATH
+ccflags-y += -DCONFIG_KSU_SUSFS_SUS_MOUNT
+ccflags-y += -DCONFIG_KSU_SUSFS_MANUAL_HOOK
+ccflags-y += -DCONFIG_KSU_SUSFS_TRY_UMOUNT
+EOF
+
+# 【2】添加 4.19 防报错参数
 if ! grep -q "-Wno-implicit-function-declaration" "$KBUILD_FILE"; then
     echo "ccflags-y += -Wno-implicit-function-declaration -Wno-strict-prototypes -Wno-int-to-pointer-cast -Wno-unused-function -Wno-unused-variable -Wno-missing-braces -Wno-declaration-after-statement" >> "$KBUILD_FILE"
 fi
@@ -418,7 +430,7 @@ sed -i 's/\/\/39 01 00 00 11 00 03 51 03 FF/39 01 00 00 11 00 03 51 03 FF/g' ${d
 # 生成基础 Config
 make $MAKE_ARGS ${TARGET_DEVICE}_defconfig
 
-# 强制注入配置 (ReSukiSU + SUSFS)
+# 强制注入配置 (已恢复 KPM)
 echo "   -> 正在注入内核配置..."
 scripts/config --file out/.config \
     -e KSU \
@@ -441,7 +453,6 @@ scripts/config --file out/.config \
     -e KSU_SUSFS_SUS_MAP \
     -d KSU_SUSFS_SUS_SU \
     -e KPM \
-    --set-str STATIC_USERMODEHELPER_PATH /system/bin/micd \
     -e PERF_CRITICAL_RT_TASK \
     -e SF_BINDER \
     -e OVERLAY_FS \
