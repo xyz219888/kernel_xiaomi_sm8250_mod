@@ -104,14 +104,14 @@ curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup
 # 下载 SUSFS 补丁 (兼容 4.19)
 wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch -q
 
-# ==================== [Step 3: Hook 注入 (完整标准版·无检测)] ====================
+# ==================== [Step 3: Hook 注入 (精准修复版·无报错)] ====================
 # 定义颜色代码
 R='\033[0;31m'   # 红
 G='\033[0;32m'   # 绿
 B='\033[0;34m'   # 蓝
 N='\033[0m'      # 清除
 
-echo -e "${B}🔧 [3/6] 正在执行 Hook 注入 (ReSukiSU 官方规范)...${N}"
+echo -e "${B}🔧 [3/6] 正在执行 Hook 注入 (ReSukiSU 官方规范 - 编译修复版)...${N}"
 
 # --- 1. 应用 SUSFS 补丁 ---
 if [ -f "susfs.patch" ]; then
@@ -120,7 +120,7 @@ if [ -f "susfs.patch" ]; then
     if [ $? -eq 0 ]; then
         echo -e "${G}      ✅ SUSFS 补丁应用成功${N}"
     else
-        echo -e "${R}      ⚠️ SUSFS 补丁应用失败或已存在 (尝试跳过)${N}"
+        echo -e "${Y}      ⚠️ SUSFS 补丁可能已应用或有冲突 (尝试跳过)${N}"
     fi
 fi
 
@@ -142,30 +142,26 @@ fi
 echo -e "${B}   -> [注入] 开始注入核心钩子...${N}"
 
 # [1] fs/read_write.c (Hook Read)
-# ReSukiSU 要求: ksu_handle_sys_read 接受指针参数 (&buf, &count)
 echo -ne "      Processed fs/read_write.c ... "
-# 注入声明
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 extern bool ksu_init_rc_hook __read_mostly;\
 extern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr);\
 #endif' fs/read_write.c
 
-# 注入调用 (在 SYSCALL_DEFINE3(read...) 开头)
 sed -i '/^SYSCALL_DEFINE3(read,/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tif (unlikely(ksu_init_rc_hook))\n\t\tksu_handle_sys_read(fd, \&buf, \&count);\n#endif/' fs/read_write.c
 echo -e "${G}OK${N}"
 
-# [2] fs/exec.c (Hook Execveat)
-# ReSukiSU 要求: void *argv, void *envp
+# [2] fs/exec.c (Hook Execveat - 修复 struct filename 可见性)
 echo -ne "      Processed fs/exec.c ... "
-# 注入声明
+# 【关键修复】添加 struct filename; 前向声明
 sed -i '/#include <linux\/file.h>/a \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
+struct filename;\
 __attribute__((hot))\
 extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\
 #endif' fs/exec.c
 
-# 注入调用 (在调用 do_execveat_common 之前)
 sed -i '/return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);/i \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 \tksu_handle_execveat((int *)AT_FDCWD, \&filename, \&argv, \&envp, 0);\
@@ -174,26 +170,22 @@ echo -e "${G}OK${N}"
 
 # [3] fs/open.c (Hook Faccessat)
 echo -ne "      Processed fs/open.c ... "
-# 注入声明
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 __attribute__((hot))\
 extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\
 #endif' fs/open.c
 
-# 注入调用
 sed -i '/return do_faccessat(dfd, filename, mode);/i \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 \tksu_handle_faccessat(\&dfd, \&filename, \&mode, NULL);\
 #endif' fs/open.c
 echo -e "${G}OK${N}"
 
-# [4] fs/stat.c (Hook Stat - 完美适配版)
-# 包含：vfs_fstatat, newfstat_ret, fstat64_ret
+# [4] fs/stat.c (Hook Stat - 精确修复 fd 报错)
 echo -ne "      Processed fs/stat.c ... "
 
-# 1. 注入声明 (补全缺失的两个 extern)
-# ReSukiSU 要求这三个函数必须声明
+# 1. 注入声明
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 __attribute__((hot))\
@@ -202,60 +194,36 @@ extern int ksu_handle_newfstat_ret(unsigned int fd, struct kstat *stat);\
 extern int ksu_handle_fstat64_ret(unsigned int fd, struct kstat *stat);\
 #endif' fs/stat.c
 
-# 2. Hook vfs_fstatat (拦截 fstatat)
-# 这是您原来就有的，位置在 vfs_fstatat 调用前
+# 2. Hook vfs_fstatat
 sed -i '/error = vfs_fstatat(dfd, filename, &stat, flag);/i \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 \tksu_handle_stat(\&dfd, \&filename, \&flag);\
 #endif' fs/stat.c
 
-# 3. Hook newfstat (拦截 newfstat 返回值 - 修复 missing hook 1)
-# 逻辑：把 return cp_new_stat(...) 替换为带 Hook 的代码块
-if grep -q "cp_new_stat" fs/stat.c; then
-    sed -i '/return cp_new_stat(&stat, statbuf);/c \
-#ifdef CONFIG_KSU_MANUAL_HOOK\
-\terror = cp_new_stat(&stat, statbuf);\
-\tif (!error) ksu_handle_newfstat_ret(fd, \&stat);\
-\treturn error;\
-#else\
-\treturn cp_new_stat(&stat, statbuf);\
-#endif' fs/stat.c
-fi
+# 3. Hook newfstat (【关键修复】限制替换范围，只在 newfstat 函数内替换)
+# 解释：只修改 newfstat 函数体内的代码，防止误伤 stat/lstat 等无 fd 的函数
+sed -i '/^SYSCALL_DEFINE2(newfstat,/,/^}/ s/return cp_new_stat(&stat, statbuf);/#ifdef CONFIG_KSU_MANUAL_HOOK\n\terror = cp_new_stat(\&stat, statbuf);\n\tif (!error) ksu_handle_newfstat_ret(fd, \&stat);\n\treturn error;\n#else\n\treturn cp_new_stat(\&stat, statbuf);\n#endif/' fs/stat.c
 
-# 4. Hook fstat64 (拦截 fstat64 返回值 - 修复 missing hook 2)
-# 逻辑：智能判断。如果源码里有 fstat64 就真 Hook；如果没有(arm64通常没有)，就添加引用以通过检查
+# 4. Hook fstat64 (【关键修复】同样限制范围)
 if grep -q "cp_new_stat64" fs/stat.c; then
-    # 情况 A: 源码存在 fstat64，执行真实 Hook
-    sed -i '/return cp_new_stat64(&stat, statbuf);/c \
-#ifdef CONFIG_KSU_MANUAL_HOOK\
-\terror = cp_new_stat64(&stat, statbuf);\
-\tif (!error) ksu_handle_fstat64_ret(fd, \&stat);\
-\treturn error;\
-#else\
-\treturn cp_new_stat64(&stat, statbuf);\
-#endif' fs/stat.c
+    sed -i '/^SYSCALL_DEFINE2(fstat64,/,/^}/ s/return cp_new_stat64(&stat, statbuf);/#ifdef CONFIG_KSU_MANUAL_HOOK\n\terror = cp_new_stat64(\&stat, statbuf);\n\tif (!error) ksu_handle_fstat64_ret(fd, \&stat);\n\treturn error;\n#else\n\treturn cp_new_stat64(\&stat, statbuf);\n#endif/' fs/stat.c
 else
-    # 情况 B: 源码不存在 fstat64 (架构差异)，添加“符号引用”适配 Kbuild 检查
-    # 这不是骗，而是为了让编译器看到这个符号，防止 ReSukiSU 报错 "You lost ... hook"
+    # 占位符适配
     echo "" >> fs/stat.c
     echo "#ifdef CONFIG_KSU_MANUAL_HOOK" >> fs/stat.c
     echo "void __ksu_check_fstat64_ret_compat(void) { (void)ksu_handle_fstat64_ret(0, NULL); }" >> fs/stat.c
     echo "#endif" >> fs/stat.c
 fi
-
 echo -e "${G}OK${N}"
 
 # [5] drivers/input/input.c (Hook Input)
-# ReSukiSU 要求: 指针参数
 echo -ne "      Processed drivers/input/input.c ... "
-# 注入声明
 sed -i '/#include <linux\/input\/mt.h>/a \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 extern bool ksu_input_hook __read_mostly;\
 extern __attribute__((cold)) int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\
 #endif' drivers/input/input.c
 
-# 注入调用
 sed -i '/if (is_event_supported(type, dev->evbit, EV_MAX))/i \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 \tif (unlikely(ksu_input_hook))\
@@ -270,45 +238,40 @@ if [ ! -f "$TARGET_FILE" ]; then
     echo -e "${R}❌ 致命错误：找不到 $TARGET_FILE 文件！${N}"
     exit 1
 fi
-# 注入声明
 sed -i '/#include <linux\/syscalls.h>/a \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 extern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);\
 #endif' "$TARGET_FILE"
 
-# 注入调用
 sed -i '/long __sys_setresuid(uid_t ruid, uid_t euid, uid_t suid)/,/{/ s/{/{ \n#ifdef CONFIG_KSU_MANUAL_HOOK\n\t(void)ksu_handle_setresuid(ruid, euid, suid);\n#endif/' "$TARGET_FILE"
 echo -e "${G}OK${N}"
 
-# [6.5] kernel/reboot.c (Hook Reboot - 必须补全)
-# ReSukiSU 要求: ksu_handle_sys_reboot
+# [6.5] kernel/reboot.c (Hook Reboot)
 echo -ne "      Processed kernel/reboot.c ... "
 TARGET_FILE="kernel/reboot.c"
 if [ -f "$TARGET_FILE" ]; then
-    # 注入声明
     sed -i '/#include <linux\/uaccess.h>/a \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\
 #endif' "$TARGET_FILE"
 
-    # 注入调用：在 SYSCALL_DEFINE4(reboot, ...) 开头
     sed -i '/SYSCALL_DEFINE4(reboot,/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_sys_reboot(magic1, magic2, cmd, \&arg);\n#endif/' "$TARGET_FILE"
     echo -e "${G}OK${N}"
 else
     echo -e "${R}SKIP (Not found)${N}"
 fi
 
-# [7] security/selinux/hooks.c (Hook SELinux)
+# [7] security/selinux/hooks.c (Hook SELinux - 修复 struct 可见性)
 echo -ne "      Processed security/selinux/hooks.c ... "
 TARGET_FILE="security/selinux/hooks.c"
 if [ -f "$TARGET_FILE" ]; then
-    # 注入声明
+    # 【关键修复】添加 struct task_security_struct; 前向声明
     sed -i '/#include <linux\/fdtable.h>/a \
+struct task_security_struct;\
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 extern bool is_ksu_transition(const struct task_security_struct *old_tsec, const struct task_security_struct *new_tsec);\
 #endif' "$TARGET_FILE"
     
-    # 注入调用
     sed -i '/if (new_tsec->sid == old_tsec->sid)/a \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 \tif (is_ksu_transition(old_tsec, new_tsec))\
