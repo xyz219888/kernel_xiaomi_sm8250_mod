@@ -789,10 +789,6 @@ CONFIG_CORESIGHT_DUMMY=y
 CONFIG_CORESIGHT_REMOTE_ETM=y
 CONFIG_CORESIGHT_TGU=y
 CONFIG_TECHPACK_CAMERA_XIAOMI=y
-
-# =========================================================
-# 1. SukiSU & SUSFS 核心 (强制内置 Y，解决 Relocation 报错)
-# =========================================================
 CONFIG_KSU=y
 CONFIG_KSU_MANUAL_HOOK=y
 CONFIG_KSU_SUSFS=y
@@ -811,17 +807,9 @@ CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
 CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
 CONFIG_KSU_SUSFS_SUS_MAP=y
 CONFIG_KPM=y
-
-# =========================================================
-# 2. 基础依赖 (OverlayFS, 符号表, UserHelper)
-# =========================================================
 CONFIG_KALLSYMS=y
 CONFIG_KALLSYMS_ALL=y
 CONFIG_OVERLAY_FS=y
-
-# =========================================================
-# 3. MIUI 专属性能与功能优化 (1:1 复刻你的老代码)
-# =========================================================
 CONFIG_XIAOMI_MIUI=y
 CONFIG_MIGT=y
 CONFIG_MIGT_ENERGY_MODEL=y
@@ -842,15 +830,11 @@ CONFIG_TASK_DELAY_ACCT=y
 CONFIG_MIUI_ZRAM_MEMORY_TRACKING=y
 CONFIG_TOUCHSCREEN_XIAOMI_TOUCHFEATURE=y
 CONFIG_INPUT_XIAOMI_KEYBOARD=y
-
-# =========================================================
-# 4. 关闭项与防检测 (1:1 复刻你的老代码)
-# =========================================================
-# CONFIG_DEBUG_FS is not set
-# CONFIG_LTO_CLANG is not set
-# CONFIG_LOCALVERSION_AUTO is not set
-# CONFIG_MI_MEMORY_SYSFS is not set
-# CONFIG_MODULE_SIG_SHA512 is not set
-# CONFIG_MODULE_SIG_HASH is not set
-# CONFIG_KSU_SUSFS_SUS_OVERLAYFS is not set
-# CONFIG_KSU_SUSFS_SUS_SU is not set
+CONFIG_DEBUG_FS is not set
+CONFIG_LTO_CLANG is not set
+CONFIG_LOCALVERSION_AUTO is not set
+CONFIG_MI_MEMORY_SYSFS is not set
+CONFIG_MODULE_SIG_SHA512 is not set
+CONFIG_MODULE_SIG_HASH is not set
+CONFIG_KSU_SUSFS_SUS_OVERLAYFS is not set
+CONFIG_KSU_SUSFS_SUS_SU is not set
