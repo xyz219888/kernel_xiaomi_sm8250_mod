@@ -393,54 +393,24 @@ fi
 
 echo "   ✅ 桥接与修复全部完成！(已修正 rules.c 参数错误)"
 
-# ==================== [Step 4: ReSukiSU 源码适配 (双重插队·防报错专版)] ====================
-echo "💉 [4/6] 执行 ReSukiSU 源码适配 (分步严谨模式)..."
+# ==================== [Step 4: ReSukiSU 源码适配 (解除限制 + 兼容性修复)] ====================
+echo "💉 [4/6] 执行 ReSukiSU 源码适配..."
 
+KCONFIG_FILE="drivers/kernelsu/Kconfig"
 KBUILD_FILE="drivers/kernelsu/Kbuild"
-if [ ! -f "$KBUILD_FILE" ]; then
-    echo "   ❌ 错误：ReSukiSU 源码未找到！"
-    exit 1
+
+# 1. 解除 Manual Hook 与 SUSFS 的互斥限制
+# 这一步至关重要，不做这一步，Manual Hook 会被自动屏蔽
+if [ -f "$KCONFIG_FILE" ]; then
+    echo "   -> 解除 Kconfig 互斥限制..."
+    sed -i 's/depends on KSU != m && !KSU_SUSFS/depends on KSU != m/g' "$KCONFIG_FILE"
 fi
 
-echo "   -> 检查并配置构建参数..."
-
-# 【工序 1】插入 Manual Hook 强制开关 & SUSFS 功能宏
-# 使用 grep 检查，防止重复
-if ! grep -q "Force Manual Hook" "$KBUILD_FILE"; then
-    echo "   -> [1/2] 正在插入 Manual Hook 与 SUSFS 全量配置..."
-    
-    sed -i '1i\
-# [Build Script] Force Manual Hook & Full Features\
-CONFIG_KSU_MANUAL_HOOK := y\
-CONFIG_KSU_SUSFS_MANUAL_HOOK := y\
-\
-ccflags-y += -DCONFIG_KSU_MANUAL_HOOK\
-ccflags-y += -DCONFIG_KSU_SUSFS_MANUAL_HOOK\
-ccflags-y += -DCONFIG_KSU_SUSFS_SUS_PATH\
-ccflags-y += -DCONFIG_KSU_SUSFS_SUS_MOUNT\
-ccflags-y += -DCONFIG_KSU_SUSFS_TRY_UMOUNT\
-ccflags-y += -DCONFIG_KSU_SUSFS_SPOOF_UNAME\
-ccflags-y += -DCONFIG_KSU_SUSFS_ENABLE_LOG\
-ccflags-y += -DCONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS\
-ccflags-y += -DCONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\
-ccflags-y += -DCONFIG_KSU_SUSFS_OPEN_REDIRECT\
-ccflags-y += -DCONFIG_KSU_SUSFS_SUS_MAP' "$KBUILD_FILE"
-
-else
-    echo "   -> 配置已存在，跳过工序 1。"
-fi
-
-# 【工序 2】插入 4.19 内核防报错参数 (您强调的部分)
-# 同样插到第 1 行，确保它在所有逻辑之前生效，绝对不偷懒
+# 2. 添加 4.19 编译器防报错参数
+# 这一步是为了防止编译过程中出现 implicit declaration 错误
 if ! grep -q "Wno-implicit-function-declaration" "$KBUILD_FILE"; then
-    echo "   -> [2/2] 正在插入 4.19 编译器防报错参数..."
-    
-    sed -i '1i\
-# [Build Script] 4.19 Compiler Flags (Anti-Error)\
-ccflags-y += -Wno-implicit-function-declaration -Wno-strict-prototypes -Wno-int-to-pointer-cast -Wno-unused-function -Wno-unused-variable' "$KBUILD_FILE"
-
-else
-    echo "   -> 防报错参数已存在，跳过工序 2。"
+    echo "   -> 添加编译器兼容参数..."
+    echo "ccflags-y += -Wno-implicit-function-declaration -Wno-strict-prototypes -Wno-int-to-pointer-cast -Wno-unused-function -Wno-unused-variable" >> "$KBUILD_FILE"
 fi
 
 # 确保 Makefile 存在
@@ -507,7 +477,6 @@ sed -i 's/\/\/39 01 00 00 11 00 03 51 03 FF/39 01 00 00 11 00 03 51 03 FF/g' ${d
 # 生成基础 Config
 make $MAKE_ARGS ${TARGET_DEVICE}_defconfig
 
-# 强制注入配置 (已恢复 KPM)
 echo "   -> 正在注入内核配置..."
 scripts/config --file out/.config \
     -e KSU \
@@ -519,7 +488,6 @@ scripts/config --file out/.config \
     -e KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT \
     -e KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
     -e KSU_SUSFS_SUS_KSTAT \
-    -d KSU_SUSFS_SUS_OVERLAYFS \
     -e KSU_SUSFS_TRY_UMOUNT \
     -e KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT \
     -e KSU_SUSFS_SPOOF_UNAME \
@@ -528,8 +496,13 @@ scripts/config --file out/.config \
     -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
     -e KSU_SUSFS_OPEN_REDIRECT \
     -e KSU_SUSFS_SUS_MAP \
+    -d KSU_SUSFS_SUS_OVERLAYFS \
     -d KSU_SUSFS_SUS_SU \
+    \
+    -e KSU_MULTI_MANAGER_SUPPORT \
     -e KPM \
+    \
+    -d STATIC_USERMODEHELPER \
     -e PERF_CRITICAL_RT_TASK \
     -e SF_BINDER \
     -e OVERLAY_FS \
@@ -557,6 +530,12 @@ scripts/config --file out/.config \
     -e RTMM
 
 make $MAKE_ARGS olddefconfig
+
+# 二次检查：确保关键配置真的开启了
+if ! grep -q "CONFIG_KSU_MULTI_MANAGER_SUPPORT=y" out/.config; then
+    echo "⚠️ 警告：多管理器支持未开启，正在强制写入..."
+    echo "CONFIG_KSU_MULTI_MANAGER_SUPPORT=y" >> out/.config
+fi
 
 # ==================== [Step 6: 编译 & 打包] ====================
 echo "🚀 [6/6] 启动多核编译..."
