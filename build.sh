@@ -104,11 +104,10 @@ curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup
 # 下载 SUSFS 补丁 (兼容 4.19)
 wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch -O susfs.patch -q
 
-# ==================== [Step 3: Hook 注入 (严格遵循 manual-integrate.md)] ====================
+# ==================== [Step 3: Hook 注入 (完整标准版·无检测)] ====================
 # 定义颜色代码
 R='\033[0;31m'   # 红
 G='\033[0;32m'   # 绿
-Y='\033[1;33m'   # 黄
 B='\033[0;34m'   # 蓝
 N='\033[0m'      # 清除
 
@@ -121,7 +120,7 @@ if [ -f "susfs.patch" ]; then
     if [ $? -eq 0 ]; then
         echo -e "${G}      ✅ SUSFS 补丁应用成功${N}"
     else
-        echo -e "${Y}      ⚠️ SUSFS 补丁可能已应用或有冲突 (尝试跳过)${N}"
+        echo -e "${R}      ⚠️ SUSFS 补丁应用失败或已存在 (尝试跳过)${N}"
     fi
 fi
 
@@ -139,32 +138,34 @@ if ! grep -q "INODE_STATE_SUS_KSTAT" include/linux/fs.h; then
 #endif' include/linux/fs.h
 fi
 
-# --- 3. 执行 Hook 注入 (ReSukiSU 精准制导) ---
+# --- 3. 执行 Hook 注入 ---
 echo -e "${B}   -> [注入] 开始注入核心钩子...${N}"
 
 # [1] fs/read_write.c (Hook Read)
 # ReSukiSU 要求: ksu_handle_sys_read 接受指针参数 (&buf, &count)
 echo -ne "      Processed fs/read_write.c ... "
+# 注入声明
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 extern bool ksu_init_rc_hook __read_mostly;\
 extern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr);\
 #endif' fs/read_write.c
 
-# 注入位置适配: 尝试匹配 SYSCALL_DEFINE3(read, ...)
+# 注入调用 (在 SYSCALL_DEFINE3(read...) 开头)
 sed -i '/^SYSCALL_DEFINE3(read,/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tif (unlikely(ksu_init_rc_hook))\n\t\tksu_handle_sys_read(fd, \&buf, \&count);\n#endif/' fs/read_write.c
 echo -e "${G}OK${N}"
 
 # [2] fs/exec.c (Hook Execveat)
-# ReSukiSU 要求: ksu_handle_execveat (无 _ksud 后缀), 参数包含 void *argv, void *envp
+# ReSukiSU 要求: void *argv, void *envp
 echo -ne "      Processed fs/exec.c ... "
+# 注入声明
 sed -i '/#include <linux\/file.h>/a \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 __attribute__((hot))\
 extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\
 #endif' fs/exec.c
 
-# 注入位置: do_execveat_common 调用前
+# 注入调用 (在调用 do_execveat_common 之前)
 sed -i '/return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);/i \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 \tksu_handle_execveat((int *)AT_FDCWD, \&filename, \&argv, \&envp, 0);\
@@ -172,14 +173,15 @@ sed -i '/return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);/i \
 echo -e "${G}OK${N}"
 
 # [3] fs/open.c (Hook Faccessat)
-# ReSukiSU 要求: ksu_handle_faccessat
 echo -ne "      Processed fs/open.c ... "
+# 注入声明
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 __attribute__((hot))\
 extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\
 #endif' fs/open.c
 
+# 注入调用
 sed -i '/return do_faccessat(dfd, filename, mode);/i \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 \tksu_handle_faccessat(\&dfd, \&filename, \&mode, NULL);\
@@ -187,14 +189,15 @@ sed -i '/return do_faccessat(dfd, filename, mode);/i \
 echo -e "${G}OK${N}"
 
 # [4] fs/stat.c (Hook Stat)
-# ReSukiSU 要求: ksu_handle_stat
 echo -ne "      Processed fs/stat.c ... "
+# 注入声明
 sed -i '/#include <linux\/fs.h>/a \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 __attribute__((hot))\
 extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\
 #endif' fs/stat.c
 
+# 注入调用
 sed -i '/error = vfs_fstatat(dfd, filename, &stat, flag);/i \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 \tksu_handle_stat(\&dfd, \&filename, \&flag);\
@@ -202,14 +205,16 @@ sed -i '/error = vfs_fstatat(dfd, filename, &stat, flag);/i \
 echo -e "${G}OK${N}"
 
 # [5] drivers/input/input.c (Hook Input)
-# ReSukiSU 要求: ksu_handle_input_handle_event
+# ReSukiSU 要求: 指针参数
 echo -ne "      Processed drivers/input/input.c ... "
+# 注入声明
 sed -i '/#include <linux\/input\/mt.h>/a \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 extern bool ksu_input_hook __read_mostly;\
 extern __attribute__((cold)) int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\
 #endif' drivers/input/input.c
 
+# 注入调用
 sed -i '/if (is_event_supported(type, dev->evbit, EV_MAX))/i \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 \tif (unlikely(ksu_input_hook))\
@@ -217,28 +222,42 @@ sed -i '/if (is_event_supported(type, dev->evbit, EV_MAX))/i \
 #endif' drivers/input/input.c
 echo -e "${G}OK${N}"
 
-# [6] kernel/sys.c (Hook Setuid - Root 核心)
-# ReSukiSU 要求: ksu_handle_setresuid
+# [6] kernel/sys.c (Hook Setuid)
 echo -ne "      Processed kernel/sys.c ... "
 TARGET_FILE="kernel/sys.c"
 if [ ! -f "$TARGET_FILE" ]; then
     echo -e "${R}❌ 致命错误：找不到 $TARGET_FILE 文件！${N}"
     exit 1
 fi
-
 # 注入声明
 sed -i '/#include <linux\/syscalls.h>/a \
 #ifdef CONFIG_KSU_MANUAL_HOOK\
 extern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);\
 #endif' "$TARGET_FILE"
 
-# 注入调用 (适配方案：在 __sys_setresuid 函数开头注入)
-# 注意：这里使用 sed 匹配函数定义后的大括号
+# 注入调用
 sed -i '/long __sys_setresuid(uid_t ruid, uid_t euid, uid_t suid)/,/{/ s/{/{ \n#ifdef CONFIG_KSU_MANUAL_HOOK\n\t(void)ksu_handle_setresuid(ruid, euid, suid);\n#endif/' "$TARGET_FILE"
 echo -e "${G}OK${N}"
 
-# [7] security/selinux/hooks.c (Hook SELinux - ReSukiSU 兼容)
-# ReSukiSU 文档指出 4.9+ 可能不需要，但若存在文件则注入以防万一
+# [6.5] kernel/reboot.c (Hook Reboot - 必须补全)
+# ReSukiSU 要求: ksu_handle_sys_reboot
+echo -ne "      Processed kernel/reboot.c ... "
+TARGET_FILE="kernel/reboot.c"
+if [ -f "$TARGET_FILE" ]; then
+    # 注入声明
+    sed -i '/#include <linux\/uaccess.h>/a \
+#ifdef CONFIG_KSU_MANUAL_HOOK\
+extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\
+#endif' "$TARGET_FILE"
+
+    # 注入调用：在 SYSCALL_DEFINE4(reboot, ...) 开头
+    sed -i '/SYSCALL_DEFINE4(reboot,/,/^{/ s/^{/{ \n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_sys_reboot(magic1, magic2, cmd, \&arg);\n#endif/' "$TARGET_FILE"
+    echo -e "${G}OK${N}"
+else
+    echo -e "${R}SKIP (Not found)${N}"
+fi
+
+# [7] security/selinux/hooks.c (Hook SELinux)
 echo -ne "      Processed security/selinux/hooks.c ... "
 TARGET_FILE="security/selinux/hooks.c"
 if [ -f "$TARGET_FILE" ]; then
