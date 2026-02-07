@@ -352,11 +352,10 @@ fi
 
 echo "   ✅ 桥接与修复全部完成！(已修正 rules.c 参数错误)"
 
-# ==================== [Step 4: ReSukiSU 源码适配 (完美逻辑版)] ====================
-echo "💉 [4/6] 执行 ReSukiSU 源码适配 (智能追加模式)..."
+# ==================== [Step 4: ReSukiSU 源码适配 (双重插队·防报错专版)] ====================
+echo "💉 [4/6] 执行 ReSukiSU 源码适配 (分步严谨模式)..."
 
 KBUILD_FILE="drivers/kernelsu/Kbuild"
-# 确保 Kbuild 存在
 if [ ! -f "$KBUILD_FILE" ]; then
     echo "   ❌ 错误：ReSukiSU 源码未找到！"
     exit 1
@@ -364,39 +363,52 @@ fi
 
 echo "   -> 检查并配置构建参数..."
 
-# 【1】配置 SUSFS Manual Hook (带防重复检查)
-# 只有当文件中还没定义 CONFIG_KSU_SUSFS_MANUAL_HOOK 时才追加
-# 这样既不会报错，也不会因为重复运行而无限追加
-if ! grep -q "CONFIG_KSU_SUSFS_MANUAL_HOOK" "$KBUILD_FILE"; then
-    echo "   -> 追加 SUSFS Manual Hook 配置..."
-    cat >> "$KBUILD_FILE" <<EOF
+# 【工序 1】插入 Manual Hook 强制开关 & SUSFS 功能宏
+# 使用 grep 检查，防止重复
+if ! grep -q "Force Manual Hook" "$KBUILD_FILE"; then
+    echo "   -> [1/2] 正在插入 Manual Hook 与 SUSFS 全量配置..."
+    
+    sed -i '1i\
+# [Build Script] Force Manual Hook & Full Features\
+CONFIG_KSU_MANUAL_HOOK := y\
+CONFIG_KSU_SUSFS_MANUAL_HOOK := y\
+\
+ccflags-y += -DCONFIG_KSU_MANUAL_HOOK\
+ccflags-y += -DCONFIG_KSU_SUSFS_MANUAL_HOOK\
+ccflags-y += -DCONFIG_KSU_SUSFS_SUS_PATH\
+ccflags-y += -DCONFIG_KSU_SUSFS_SUS_MOUNT\
+ccflags-y += -DCONFIG_KSU_SUSFS_TRY_UMOUNT\
+ccflags-y += -DCONFIG_KSU_SUSFS_SPOOF_UNAME\
+ccflags-y += -DCONFIG_KSU_SUSFS_ENABLE_LOG\
+ccflags-y += -DCONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS\
+ccflags-y += -DCONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\
+ccflags-y += -DCONFIG_KSU_SUSFS_OPEN_REDIRECT\
+ccflags-y += -DCONFIG_KSU_SUSFS_SUS_MAP' "$KBUILD_FILE"
 
-# --- Added by build script for SUSFS Manual Hook ---
-ccflags-y += -DCONFIG_KSU_SUSFS
-ccflags-y += -DCONFIG_KSU_SUSFS_SUS_PATH
-ccflags-y += -DCONFIG_KSU_SUSFS_SUS_MOUNT
-ccflags-y += -DCONFIG_KSU_SUSFS_MANUAL_HOOK
-ccflags-y += -DCONFIG_KSU_SUSFS_TRY_UMOUNT
-EOF
 else
-    echo "   -> SUSFS Manual Hook 配置已存在，跳过追加。"
+    echo "   -> 配置已存在，跳过工序 1。"
 fi
 
-# 【2】添加 4.19 防报错参数 (带防重复检查)
-# 只有当文件中没有这些参数时才添加
+# 【工序 2】插入 4.19 内核防报错参数 (您强调的部分)
+# 同样插到第 1 行，确保它在所有逻辑之前生效，绝对不偷懒
 if ! grep -q "Wno-implicit-function-declaration" "$KBUILD_FILE"; then
-    echo "   -> 追加编译器防报错参数..."
-    echo "ccflags-y += -Wno-implicit-function-declaration -Wno-strict-prototypes -Wno-int-to-pointer-cast -Wno-unused-function -Wno-unused-variable" >> "$KBUILD_FILE"
+    echo "   -> [2/2] 正在插入 4.19 编译器防报错参数..."
+    
+    sed -i '1i\
+# [Build Script] 4.19 Compiler Flags (Anti-Error)\
+ccflags-y += -Wno-implicit-function-declaration -Wno-strict-prototypes -Wno-int-to-pointer-cast -Wno-unused-function -Wno-unused-variable' "$KBUILD_FILE"
+
 else
-    echo "   -> 防报错参数已存在，跳过。"
+    echo "   -> 防报错参数已存在，跳过工序 2。"
 fi
 
-# 【3】确保 Makefile 存在
+# 确保 Makefile 存在
 if [ ! -f "drivers/kernelsu/Makefile" ]; then
     echo "obj-y += ksu_core.o" > drivers/kernelsu/Makefile
 fi
 
 echo "   ✅ ReSukiSU 适配完成！"
+
 # ==================== [Step 5: MIUI DTS & Config] ====================
 echo "⚙️ [5/6] 执行 MIUI 深度适配 (完整保留)..."
 
