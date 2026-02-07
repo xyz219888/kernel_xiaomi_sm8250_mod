@@ -818,8 +818,6 @@ CONFIG_KPM=y
 CONFIG_KALLSYMS=y
 CONFIG_KALLSYMS_ALL=y
 CONFIG_OVERLAY_FS=y
-CONFIG_STATIC_USERMODEHELPER=y
-CONFIG_STATIC_USERMODEHELPER_PATH="/system/bin/micd"
 
 # =========================================================
 # 3. MIUI 专属性能与功能优化 (1:1 复刻你的老代码)
