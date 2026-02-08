@@ -460,7 +460,6 @@ scripts/config --file out/.config \
     -d KSU_SUSFS_SUS_OVERLAYFS \
     -d KSU_SUSFS_SUS_SU \
     \
-    -e KSU_MULTI_MANAGER_SUPPORT \
     -e KPM \
     \
     -d STATIC_USERMODEHELPER \
