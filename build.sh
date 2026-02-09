@@ -278,77 +278,49 @@ echo -e "${Y}   -> [Linker Fix] 跳过 SELinux 钩子注入，防止 undefined r
 
 echo -e "${G}🎉 Hook 注入全部完成！${N}"
 
-# ==================== [Step 3.5: 变量桥接与链接修复 (修复版)] ====================
-echo "🔧 [3.5/6] 正在执行变量桥接与冲突修复..."
+# ==================== [Step 3.5: ReSukiSU 最小化适配] ====================
+echo -e "\033[0;34m🔧 [3.5/6] 正在链接 ReSukiSU 并修正参数...\033[0m"
 
-# 1. 强制 drivers/Makefile 包含 kernelsu
+# 1. 链接 KernelSU (你要求的：只确保 ksu 在)
 DRIVERS_MAKEFILE="drivers/Makefile"
 if [ -f "$DRIVERS_MAKEFILE" ]; then
+    # 删掉 kernelsu 这一行（如果有的话），防止重复
     sed -i '/kernelsu/d' "$DRIVERS_MAKEFILE"
+    # 加回去
     echo "obj-y += kernelsu/" >> "$DRIVERS_MAKEFILE"
+    echo "   -> 已将 kernelsu 加入编译列表"
 fi
 
-# 2. 桥接 Policydb
-SERVICES_FILE="security/selinux/ss/services.c"
-if [ -f "$SERVICES_FILE" ]; then
-    if ! grep -q "linux/export.h" "$SERVICES_FILE"; then
-        sed -i '/#include <linux\/kernel.h>/a #include <linux/export.h>' "$SERVICES_FILE"
-    fi
-    if ! grep -q "ksu_policydb_ptr" "$SERVICES_FILE"; then
-        cat >> "$SERVICES_FILE" <<EOF
+# 注意：我完全没碰 drivers/Makefile 里的 susfs，随它去！
 
-struct policydb *ksu_policydb_ptr = &selinux_ss.policydb;
-EXPORT_SYMBOL(ksu_policydb_ptr);
-EOF
-    fi
-fi
-
-# 3. 桥接 AVC
-AVC_FILE="security/selinux/avc.c"
-if [ -f "$AVC_FILE" ]; then
-    if ! grep -q "linux/export.h" "$AVC_FILE"; then
-        sed -i '/#include <linux\/types.h>/a #include <linux/export.h>' "$AVC_FILE"
-    fi
-    if ! grep -q "ksu_selinux_avc_ptr" "$AVC_FILE"; then
-        cat >> "$AVC_FILE" <<EOF
-
-struct selinux_avc *ksu_selinux_avc_ptr = &selinux_avc;
-EXPORT_SYMBOL(ksu_selinux_avc_ptr);
-EOF
-    fi
-fi
-
-# 4. 适配 rules.c (修复参数报错)
+# 2. 修正 rules.c (只修参数个数，其他不动)
 RULES_FILE="drivers/kernelsu/selinux/rules.c"
 if [ -f "$RULES_FILE" ]; then
-    echo "   -> 修复 drivers/kernelsu/selinux/rules.c ..."
     
-    # 替换 get_policydb 实现
-    if grep -q "static struct policydb \*get_policydb(void)" "$RULES_FILE"; then
-       sed -i '/static struct policydb \*get_policydb(void)/,/^}/c\
-extern struct policydb *ksu_policydb_ptr;\
-static struct policydb *get_policydb(void)\
-{\
-    return ksu_policydb_ptr;\
-}' "$RULES_FILE"
+    # 检查是否需要修复参数 (ReSukiSU 默认是 2 个参数，4.19 需要 1 个)
+    # 我们用 sed 查找 "avc_ss_reset(ksu_selinux_avc_ptr, 0)" 这种双参数写法
+    # 如果找到了，就替换成 "avc_ss_reset(0)"
+    
+    if grep -q "avc_ss_reset.*," "$RULES_FILE"; then
+        echo "   -> 检测到 ReSukiSU 使用双参数调用，正在修正为单参数 (适配 4.19)..."
+        sed -i 's/avc_ss_reset(.*, 0)/avc_ss_reset(0)/g' "$RULES_FILE"
+        # 再次兜底替换，防止写法不一样
+        sed -i 's/avc_ss_reset(ksu_selinux_avc_ptr, 0)/avc_ss_reset(0)/g' "$RULES_FILE"
+    else
+        echo "   -> 看起来源码已经是单参数或者用了宏，跳过修正。"
     fi
     
-    # 【修复重点】修正 reset_avc_cache 参数
-    # 将 selnl_notify_policyload(NULL, 0) 改为 selnl_notify_policyload(0)
-    if grep -q "static void reset_avc_cache(void)" "$RULES_FILE"; then
-        sed -i '/static void reset_avc_cache(void)/,/^}/c\
-extern struct selinux_avc *ksu_selinux_avc_ptr;\
-extern int avc_ss_reset(struct selinux_avc *avc, u32 seqno);\
-static void reset_avc_cache(void)\
-{\
-    avc_ss_reset(ksu_selinux_avc_ptr, 0);\
-    selnl_notify_policyload(0);\
-    selinux_xfrm_notify_policyload();\
-}' "$RULES_FILE"
+    # 顺便处理一下 extern 引用，防止链接不到
+    # (这是 ReSukiSU 官方建议的在 built-in 模式下的补丁)
+    if grep -q "static struct policydb \*get_policydb(void)" "$RULES_FILE"; then
+        # 如果源码里没有 extern 声明，我们加一个，确保能找到符号
+        if ! grep -q "extern struct policydb policydb;" "$RULES_FILE"; then
+             sed -i '/#include "xfrm.h"/a extern struct policydb policydb;' "$RULES_FILE"
+        fi
     fi
 fi
 
-echo "   ✅ 桥接与修复全部完成！(已修正 rules.c 参数错误)"
+echo -e "\033[0;32m✅ ReSukiSU 配置完成！(已保留 SUSFS 配置)\033[0m"
 
 # ==================== [Step 4: ReSukiSU 源码适配 (解除限制 + 兼容性修复)] ====================
 echo "💉 [4/6] 执行 ReSukiSU 源码适配..."
