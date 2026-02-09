@@ -512,7 +512,7 @@ if [ -f "out/arch/arm64/boot/Image" ]; then
     cp out/arch/arm64/boot/Image anykernel/kernels/
     find out/arch/arm64/boot/dts -name '*.dtb' -exec cat {} + > anykernel/kernels/dtb
     cd anykernel
-    zip -r9 "../Kernel_Alioth_ReSukiSU_$(date +'%Y%m%d').zip" ./* -x .git .gitignore
+    zip -r9 "../Kernel_Alioth_SukiSU_$(date +'%Y%m%d').zip" ./* -x .git .gitignore
     cd ..
     echo -e "\033[0;32m🎉 刷机包已生成！\033[0m"
 else
