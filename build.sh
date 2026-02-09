@@ -278,70 +278,77 @@ echo -e "${Y}   -> [Linker Fix] 跳过 SELinux 钩子注入，防止 undefined r
 
 echo -e "${G}🎉 Hook 注入全部完成！${N}"
 
-# ==================== [Step 3.5: ReSukiSU 终极适配 (声明与调用同步修正版)] ====================
-echo -e "\033[0;34m🔧 [3.5/6] 正在执行 ReSukiSU 终极适配 (声明+调用同步修复)...\033[0m"
+# ==================== [Step 3.5: ReSukiSU 编译修复 (精准卡位版)] ====================
+echo -e "\033[0;34m🔧 [3.5/6] 正在执行 rules.c 顺序与声明修复...\033[0m"
 
-# 1. 修正 Drivers Makefile (常规操作)
+# 1. 修正 Drivers Makefile
 DRIVERS_MAKEFILE="drivers/Makefile"
 if [ -f "$DRIVERS_MAKEFILE" ]; then
     sed -i '/kernelsu/d' "$DRIVERS_MAKEFILE"
     echo "obj-y += kernelsu/" >> "$DRIVERS_MAKEFILE"
 fi
 
-# 2. 修正 rules.c (这是核心战场)
+# 2. 修正 rules.c
 RULES_FILE="drivers/kernelsu/selinux/rules.c"
 if [ -f "$RULES_FILE" ]; then
-    echo "   -> 正在重写 avc_ss_reset 逻辑..."
+    echo "   -> 正在重写 rules.c 逻辑..."
 
-    # [A] 清理旧代码：把所有关于 avc_ss_reset 的声明和函数都删掉
-    # 1. 删掉旧的 extern 声明 (不管它是单参数还是双参数，统统删掉，防止干扰)
+    # [A] 清理旧代码
     sed -i '/extern.*avc_ss_reset/d' "$RULES_FILE"
-    
-    # 2. 删掉旧的 reset_avc_cache 函数体 (连根拔起，防止残留)
-    # 利用 sed 的区间删除功能，从函数定义行删到右大括号
     sed -i '/static void reset_avc_cache(void)/,/^}/d' "$RULES_FILE"
 
-    # [B] 注入新代码：写入全新的、匹配 4.19 内核的逻辑
-    # 我们把【声明】和【函数实现】写在一起，确保编译器绝对满意
+    # [B] 准备新代码
+    # 依然是单参数声明 + 单参数调用
     cat > rules_patch.c <<EOF
 
-/* [ReSukiSU Fix] For Linux 4.19: Single Argument Sync */
+/* [ReSukiSU Fix] For Linux 4.19: Inserted AFTER headers */
 
-// 1. 显式声明：告诉编译器这个内核函数只吃 1 个参数
+// 1. 显式声明 avc_ss_reset (因为它不在标准头文件里)
 extern int avc_ss_reset(u32 seqno);
 
-// 2. 正确调用：只传 1 个参数
+// 2. 重写 reset_avc_cache
 static void reset_avc_cache(void)
 {
     // 强制传 0
     avc_ss_reset(0);
     
-    // 其它通知函数保持原样
+    // 现在这里能正确看到头文件里的定义了，不会报错
     selnl_notify_policyload(0);
     selinux_xfrm_notify_policyload();
 }
 EOF
 
-    # [C] 插入到文件头部
-    # 插在 #include <linux/types.h> 后面，确保位置靠前，让编译器先看到声明
-    if grep -q "#include <linux/types.h>" "$RULES_FILE"; then
-        sed -i '/#include <linux\/types.h>/r rules_patch.c' "$RULES_FILE"
+    # [C] 关键修正：改变插入位置！
+    # 之前是插在 types.h 后面（太早了），现在插在 xfrm.h 后面（刚刚好）
+    # 我们用模糊匹配 "include.*xfrm.h" 来覆盖各种写法
+    if grep -q "xfrm.h" "$RULES_FILE"; then
+        sed -i '/include.*xfrm.h/r rules_patch.c' "$RULES_FILE"
+        echo "   -> 已插入到 xfrm.h 之后 (完美位置)"
     else
-        # 兜底：如果没有 types.h，就插在第一个 include 后面
-        sed -i '0,/#include/s//#include\n#include <linux\/types.h>/' "$RULES_FILE"
-        sed -i '/#include <linux\/types.h>/r rules_patch.c' "$RULES_FILE"
+        # 兜底：如果没找到 xfrm.h，尝试插在 sepolicy.h 后面
+        if grep -q "sepolicy.h" "$RULES_FILE"; then
+            sed -i '/include.*sepolicy.h/r rules_patch.c' "$RULES_FILE"
+            echo "   -> 已插入到 sepolicy.h 之后 (备选位置)"
+        else
+            # 最后的倔强：插在所有 include 的最后
+            # 找文件中最后一个 #include，在他后面插入
+            # (这里用一个简单的逻辑：插在第 30 行左右，通常是安全的)
+            sed -i '30r rules_patch.c' "$RULES_FILE"
+            echo "   -> 未找到特定头文件，强制插入到第 30 行"
+        fi
     fi
     rm -f rules_patch.c
 
-    # [D] 补全 policydb 声明 (防止报另一个错)
+    # [D] 补全 policydb (保持原样)
     if grep -q "static struct policydb \*get_policydb(void)" "$RULES_FILE"; then
         if ! grep -q "extern struct policydb policydb;" "$RULES_FILE"; then
-             sed -i '/extern int avc_ss_reset/a extern struct policydb policydb;' "$RULES_FILE"
+             # 插在我们的 patch 后面即可
+             sed -i '/static void reset_avc_cache(void)/i extern struct policydb policydb;' "$RULES_FILE"
         fi
     fi
 fi
 
-echo -e "\033[0;32m✅ rules.c 修复完成！(已解决 too few arguments 报错)\033[0m"
+echo -e "\033[0;32m✅ rules.c 逻辑修正完成！(已解决冲突报错)\033[0m"
 
 # ==================== [Step 4: ReSukiSU 源码适配 (解除限制 + 兼容性修复)] ====================
 echo "💉 [4/6] 执行 ReSukiSU 源码适配..."
