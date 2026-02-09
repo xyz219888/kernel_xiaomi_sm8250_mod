@@ -278,49 +278,70 @@ echo -e "${Y}   -> [Linker Fix] 跳过 SELinux 钩子注入，防止 undefined r
 
 echo -e "${G}🎉 Hook 注入全部完成！${N}"
 
-# ==================== [Step 3.5: ReSukiSU 最小化适配] ====================
-echo -e "\033[0;34m🔧 [3.5/6] 正在链接 ReSukiSU 并修正参数...\033[0m"
+# ==================== [Step 3.5: ReSukiSU 终极适配 (声明与调用同步修正版)] ====================
+echo -e "\033[0;34m🔧 [3.5/6] 正在执行 ReSukiSU 终极适配 (声明+调用同步修复)...\033[0m"
 
-# 1. 链接 KernelSU (你要求的：只确保 ksu 在)
+# 1. 修正 Drivers Makefile (常规操作)
 DRIVERS_MAKEFILE="drivers/Makefile"
 if [ -f "$DRIVERS_MAKEFILE" ]; then
-    # 删掉 kernelsu 这一行（如果有的话），防止重复
     sed -i '/kernelsu/d' "$DRIVERS_MAKEFILE"
-    # 加回去
     echo "obj-y += kernelsu/" >> "$DRIVERS_MAKEFILE"
-    echo "   -> 已将 kernelsu 加入编译列表"
 fi
 
-# 注意：我完全没碰 drivers/Makefile 里的 susfs，随它去！
-
-# 2. 修正 rules.c (只修参数个数，其他不动)
+# 2. 修正 rules.c (这是核心战场)
 RULES_FILE="drivers/kernelsu/selinux/rules.c"
 if [ -f "$RULES_FILE" ]; then
+    echo "   -> 正在重写 avc_ss_reset 逻辑..."
+
+    # [A] 清理旧代码：把所有关于 avc_ss_reset 的声明和函数都删掉
+    # 1. 删掉旧的 extern 声明 (不管它是单参数还是双参数，统统删掉，防止干扰)
+    sed -i '/extern.*avc_ss_reset/d' "$RULES_FILE"
     
-    # 检查是否需要修复参数 (ReSukiSU 默认是 2 个参数，4.19 需要 1 个)
-    # 我们用 sed 查找 "avc_ss_reset(ksu_selinux_avc_ptr, 0)" 这种双参数写法
-    # 如果找到了，就替换成 "avc_ss_reset(0)"
+    # 2. 删掉旧的 reset_avc_cache 函数体 (连根拔起，防止残留)
+    # 利用 sed 的区间删除功能，从函数定义行删到右大括号
+    sed -i '/static void reset_avc_cache(void)/,/^}/d' "$RULES_FILE"
+
+    # [B] 注入新代码：写入全新的、匹配 4.19 内核的逻辑
+    # 我们把【声明】和【函数实现】写在一起，确保编译器绝对满意
+    cat > rules_patch.c <<EOF
+
+/* [ReSukiSU Fix] For Linux 4.19: Single Argument Sync */
+
+// 1. 显式声明：告诉编译器这个内核函数只吃 1 个参数
+extern int avc_ss_reset(u32 seqno);
+
+// 2. 正确调用：只传 1 个参数
+static void reset_avc_cache(void)
+{
+    // 强制传 0
+    avc_ss_reset(0);
     
-    if grep -q "avc_ss_reset.*," "$RULES_FILE"; then
-        echo "   -> 检测到 ReSukiSU 使用双参数调用，正在修正为单参数 (适配 4.19)..."
-        sed -i 's/avc_ss_reset(.*, 0)/avc_ss_reset(0)/g' "$RULES_FILE"
-        # 再次兜底替换，防止写法不一样
-        sed -i 's/avc_ss_reset(ksu_selinux_avc_ptr, 0)/avc_ss_reset(0)/g' "$RULES_FILE"
+    // 其它通知函数保持原样
+    selnl_notify_policyload(0);
+    selinux_xfrm_notify_policyload();
+}
+EOF
+
+    # [C] 插入到文件头部
+    # 插在 #include <linux/types.h> 后面，确保位置靠前，让编译器先看到声明
+    if grep -q "#include <linux/types.h>" "$RULES_FILE"; then
+        sed -i '/#include <linux\/types.h>/r rules_patch.c' "$RULES_FILE"
     else
-        echo "   -> 看起来源码已经是单参数或者用了宏，跳过修正。"
+        # 兜底：如果没有 types.h，就插在第一个 include 后面
+        sed -i '0,/#include/s//#include\n#include <linux\/types.h>/' "$RULES_FILE"
+        sed -i '/#include <linux\/types.h>/r rules_patch.c' "$RULES_FILE"
     fi
-    
-    # 顺便处理一下 extern 引用，防止链接不到
-    # (这是 ReSukiSU 官方建议的在 built-in 模式下的补丁)
+    rm -f rules_patch.c
+
+    # [D] 补全 policydb 声明 (防止报另一个错)
     if grep -q "static struct policydb \*get_policydb(void)" "$RULES_FILE"; then
-        # 如果源码里没有 extern 声明，我们加一个，确保能找到符号
         if ! grep -q "extern struct policydb policydb;" "$RULES_FILE"; then
-             sed -i '/#include "xfrm.h"/a extern struct policydb policydb;' "$RULES_FILE"
+             sed -i '/extern int avc_ss_reset/a extern struct policydb policydb;' "$RULES_FILE"
         fi
     fi
 fi
 
-echo -e "\033[0;32m✅ ReSukiSU 配置完成！(已保留 SUSFS 配置)\033[0m"
+echo -e "\033[0;32m✅ rules.c 修复完成！(已解决 too few arguments 报错)\033[0m"
 
 # ==================== [Step 4: ReSukiSU 源码适配 (解除限制 + 兼容性修复)] ====================
 echo "💉 [4/6] 执行 ReSukiSU 源码适配..."
