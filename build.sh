@@ -278,10 +278,10 @@ echo -e "${Y}   -> [Linker Fix] 跳过 SELinux 钩子注入，防止 undefined r
 
 echo -e "${G}🎉 Hook 注入全部完成！${N}"
 
-# ==================== [Step 3.5: 终极神偷 (绝对置顶修复版)] ====================
-echo -e "\033[0;34m🔧 [3.5/6] 正在注入动态查找逻辑 (位置置顶版)...\033[0m"
+# ==================== [Step 3.5: 终极分离修复 (ReSukiSU/SukiSU 通用)] ====================
+echo -e "\033[0;34m🔧 [3.5/6] 正在执行分离式逻辑注入 (解开死锁)...\033[0m"
 
-# 1. 修正 Drivers Makefile (常规操作)
+# 1. 修正 Drivers Makefile
 DRIVERS_MAKEFILE="drivers/Makefile"
 if [ -f "$DRIVERS_MAKEFILE" ]; then
     sed -i '/kernelsu/d' "$DRIVERS_MAKEFILE"
@@ -291,28 +291,46 @@ fi
 # 2. 修正 rules.c
 RULES_FILE="drivers/kernelsu/selinux/rules.c"
 if [ -f "$RULES_FILE" ]; then
-    echo "   -> 正在重写 rules.c (强制前置定义)..."
+    echo "   -> 正在重写 rules.c ..."
 
-    # [A] 引入头文件 (kallsyms)
-    if ! grep -q "linux/kallsyms.h" "$RULES_FILE"; then
-        sed -i '/#include <linux\/types.h>/a #include <linux/kallsyms.h>' "$RULES_FILE"
-    fi
-
-    # [B] 大清洗：删掉所有可能冲突的旧定义
+    # [A] 清理旧代码 (斩草除根)
     sed -i '/extern.*avc_ss_reset/d' "$RULES_FILE"
     sed -i '/extern.*selnl_notify_policyload/d' "$RULES_FILE"
     sed -i '/static void reset_avc_cache(void)/,/^}/d' "$RULES_FILE"
     sed -i '/static struct policydb \*get_policydb(void)/,/^}/d' "$RULES_FILE"
 
-    # [C] 准备新代码 (包含 avc_ss_reset 和 get_policydb)
-    cat > rules_patch.c <<EOF
+    # [B] 注入第 1 部分：前置声明 (Forward Declarations)
+    # 放在文件最顶部，解决 "get_policydb 找不到" 的问题
+    cat > rules_head.c <<EOF
 
-/* [KSU_FIX] Dynamic Resolvers (Must be at TOP) */
+/* [KSU_FIX] Part 1: Forward Declarations */
+#include <linux/kallsyms.h> 
+
+// 提前告诉编译器这两个函数的存在
+struct policydb; 
+static struct policydb *get_policydb(void);
+static void reset_avc_cache(void);
+
+EOF
+
+    # 插入到 types.h 之后 (最前面)
+    if grep -q "#include <linux/types.h>" "$RULES_FILE"; then
+        sed -i '/#include <linux\/types.h>/r rules_head.c' "$RULES_FILE"
+    else
+        sed -i '0,/#include/s//#include\n#include <linux\/types.h>/' "$RULES_FILE"
+        sed -i '/#include <linux\/types.h>/r rules_head.c' "$RULES_FILE"
+    fi
+    rm -f rules_head.c
+
+    # [C] 注入第 2 部分：具体实现 (Implementation)
+    # 放在头文件之后，解决 "kallsyms/xfrm 类型冲突" 的问题
+    cat > rules_body.c <<EOF
+
+/* [KSU_FIX] Part 2: Implementation */
 
 typedef int (*avc_ss_reset_t)(void *avc, u32 seqno);
 typedef void (*notify_t)(u32 seqno);
 
-// 1. 实现 get_policydb (这就是报错的那个函数)
 static struct policydb *get_policydb(void)
 {
     static struct policydb *sym_policydb = NULL;
@@ -322,25 +340,22 @@ static struct policydb *get_policydb(void)
     return sym_policydb;
 }
 
-// 2. 实现 reset_avc_cache (神偷战术)
 static void reset_avc_cache(void)
 {
     static avc_ss_reset_t sym_avc_ss_reset = NULL;
     static void *sym_selinux_avc = NULL;
     static notify_t sym_selnl_notify = NULL;
     
-    // 偷地址
+    // 神偷战术：动态获取地址
     if (!sym_avc_ss_reset) {
         sym_avc_ss_reset = (avc_ss_reset_t)kallsyms_lookup_name("avc_ss_reset");
         sym_selinux_avc = (void *)kallsyms_lookup_name("selinux_avc");
     }
 
-    // 执行
     if (sym_avc_ss_reset && sym_selinux_avc) {
         sym_avc_ss_reset(sym_selinux_avc, 0);
     }
     
-    // 通知
     if (!sym_selnl_notify) {
         sym_selnl_notify = (notify_t)kallsyms_lookup_name("selnl_notify_policyload");
     }
@@ -348,24 +363,25 @@ static void reset_avc_cache(void)
         sym_selnl_notify(0);
     }
 
+    // 这里已经是头文件之后了，可以直接调用 static inline 函数
     selinux_xfrm_notify_policyload();
 }
 EOF
 
-    # [D] 关键：强制插入到 <linux/types.h> 之后
-    # 这里我们不再找 xfrm.h 了，直接插在最前面，确保所有函数都能看到它！
-    if grep -q "#include <linux/types.h>" "$RULES_FILE"; then
-        sed -i '/#include <linux\/types.h>/r rules_patch.c' "$RULES_FILE"
-        echo "   -> 已将代码插入到文件头部 (Types.h 之后)"
+    # 插入到 xfrm.h 之后 (中间位置)
+    # 如果找不到 xfrm.h，就尝试 sepolicy.h，再不行就插在 include 块的末尾
+    if grep -q "xfrm.h" "$RULES_FILE"; then
+        sed -i '/include.*xfrm.h/r rules_body.c' "$RULES_FILE"
+    elif grep -q "sepolicy.h" "$RULES_FILE"; then
+        sed -i '/include.*sepolicy.h/r rules_body.c' "$RULES_FILE"
     else
-        # 兜底：如果没有 types.h，就插在第一个 #include 后面
-        sed -i '0,/#include/s//#include\n#include <linux\/types.h>/' "$RULES_FILE"
-        sed -i '/#include <linux\/types.h>/r rules_patch.c' "$RULES_FILE"
+        # 最后的手段：插在第 50 行左右
+        sed -i '50r rules_body.c' "$RULES_FILE"
     fi
-    rm -f rules_patch.c
+    rm -f rules_body.c
 fi
 
-echo -e "\033[0;32m✅ 修复完成！(定义已前置)\033[0m"
+echo -e "\033[0;32m✅ 修复完成！(采用声明分离战术)\033[0m"
 
 # ==================== [Step 4: ReSukiSU 源码适配 (解除限制 + 兼容性修复)] ====================
 echo "💉 [4/6] 执行 ReSukiSU 源码适配..."
