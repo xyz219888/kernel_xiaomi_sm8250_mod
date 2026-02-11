@@ -278,33 +278,51 @@ echo -e "${Y}   -> [Linker Fix] 跳过 SELinux 钩子注入，防止 undefined r
 
 echo -e "${G}🎉 Hook 注入全部完成！${N}"
 
-# ==================== [Step 3.5: 终极神偷 (静默隐匿版)] ====================
-echo -e "\033[0;34m🔧 [3.5/6] 正在注入动态查找逻辑 (静默版)...\033[0m"
+# ==================== [Step 3.5: 终极神偷 (绝对置顶修复版)] ====================
+echo -e "\033[0;34m🔧 [3.5/6] 正在注入动态查找逻辑 (位置置顶版)...\033[0m"
 
+# 1. 修正 Drivers Makefile (常规操作)
 DRIVERS_MAKEFILE="drivers/Makefile"
 if [ -f "$DRIVERS_MAKEFILE" ]; then
     sed -i '/kernelsu/d' "$DRIVERS_MAKEFILE"
     echo "obj-y += kernelsu/" >> "$DRIVERS_MAKEFILE"
 fi
 
+# 2. 修正 rules.c
 RULES_FILE="drivers/kernelsu/selinux/rules.c"
 if [ -f "$RULES_FILE" ]; then
-    # 引入 kallsyms
+    echo "   -> 正在重写 rules.c (强制前置定义)..."
+
+    # [A] 引入头文件 (kallsyms)
     if ! grep -q "linux/kallsyms.h" "$RULES_FILE"; then
         sed -i '/#include <linux\/types.h>/a #include <linux/kallsyms.h>' "$RULES_FILE"
     fi
 
-    # 清理旧代码
+    # [B] 大清洗：删掉所有可能冲突的旧定义
     sed -i '/extern.*avc_ss_reset/d' "$RULES_FILE"
     sed -i '/extern.*selnl_notify_policyload/d' "$RULES_FILE"
     sed -i '/static void reset_avc_cache(void)/,/^}/d' "$RULES_FILE"
+    sed -i '/static struct policydb \*get_policydb(void)/,/^}/d' "$RULES_FILE"
 
-    # 注入神偷代码 (不打印任何日志)
+    # [C] 准备新代码 (包含 avc_ss_reset 和 get_policydb)
     cat > rules_patch.c <<EOF
+
+/* [KSU_FIX] Dynamic Resolvers (Must be at TOP) */
 
 typedef int (*avc_ss_reset_t)(void *avc, u32 seqno);
 typedef void (*notify_t)(u32 seqno);
 
+// 1. 实现 get_policydb (这就是报错的那个函数)
+static struct policydb *get_policydb(void)
+{
+    static struct policydb *sym_policydb = NULL;
+    if (!sym_policydb) {
+        sym_policydb = (struct policydb *)kallsyms_lookup_name("policydb");
+    }
+    return sym_policydb;
+}
+
+// 2. 实现 reset_avc_cache (神偷战术)
 static void reset_avc_cache(void)
 {
     static avc_ss_reset_t sym_avc_ss_reset = NULL;
@@ -317,11 +335,12 @@ static void reset_avc_cache(void)
         sym_selinux_avc = (void *)kallsyms_lookup_name("selinux_avc");
     }
 
-    // 只有偷到了才执行 (静默执行，失败了也不报错)
+    // 执行
     if (sym_avc_ss_reset && sym_selinux_avc) {
         sym_avc_ss_reset(sym_selinux_avc, 0);
     }
     
+    // 通知
     if (!sym_selnl_notify) {
         sym_selnl_notify = (notify_t)kallsyms_lookup_name("selnl_notify_policyload");
     }
@@ -332,27 +351,21 @@ static void reset_avc_cache(void)
     selinux_xfrm_notify_policyload();
 }
 EOF
-    # 插入代码
-    if grep -q "xfrm.h" "$RULES_FILE"; then
-        sed -i '/include.*xfrm.h/r rules_patch.c' "$RULES_FILE"
+
+    # [D] 关键：强制插入到 <linux/types.h> 之后
+    # 这里我们不再找 xfrm.h 了，直接插在最前面，确保所有函数都能看到它！
+    if grep -q "#include <linux/types.h>" "$RULES_FILE"; then
+        sed -i '/#include <linux\/types.h>/r rules_patch.c' "$RULES_FILE"
+        echo "   -> 已将代码插入到文件头部 (Types.h 之后)"
     else
+        # 兜底：如果没有 types.h，就插在第一个 #include 后面
+        sed -i '0,/#include/s//#include\n#include <linux\/types.h>/' "$RULES_FILE"
         sed -i '/#include <linux\/types.h>/r rules_patch.c' "$RULES_FILE"
     fi
     rm -f rules_patch.c
-    
-    # 顺便处理 get_policydb
-    if grep -q "static struct policydb \*get_policydb(void)" "$RULES_FILE"; then
-         sed -i '/static struct policydb \*get_policydb(void)/,/^}/d' "$RULES_FILE"
-         cat >> "$RULES_FILE" <<EOF
-static struct policydb *get_policydb(void)
-{
-    static struct policydb *sym_policydb = NULL;
-    if (!sym_policydb) sym_policydb = (struct policydb *)kallsyms_lookup_name("policydb");
-    return sym_policydb;
-}
-EOF
-    fi
 fi
+
+echo -e "\033[0;32m✅ 修复完成！(定义已前置)\033[0m"
 
 # ==================== [Step 4: ReSukiSU 源码适配 (解除限制 + 兼容性修复)] ====================
 echo "💉 [4/6] 执行 ReSukiSU 源码适配..."
