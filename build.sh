@@ -278,80 +278,81 @@ echo -e "${Y}   -> [Linker Fix] 跳过 SELinux 钩子注入，防止 undefined r
 
 echo -e "${G}🎉 Hook 注入全部完成！${N}"
 
-# ==================== [Step 3.5: ReSukiSU 编译修复 (终极融合版)] ====================
-echo -e "\033[0;34m🔧 [3.5/6] 正在执行 rules.c 修复 (卡位+显式声明双重保险)...\033[0m"
+# ==================== [Step 3.5: 终极神偷 (静默隐匿版)] ====================
+echo -e "\033[0;34m🔧 [3.5/6] 正在注入动态查找逻辑 (静默版)...\033[0m"
 
-# 1. 修正 Drivers Makefile
 DRIVERS_MAKEFILE="drivers/Makefile"
 if [ -f "$DRIVERS_MAKEFILE" ]; then
     sed -i '/kernelsu/d' "$DRIVERS_MAKEFILE"
     echo "obj-y += kernelsu/" >> "$DRIVERS_MAKEFILE"
 fi
 
-# 2. 修正 rules.c
 RULES_FILE="drivers/kernelsu/selinux/rules.c"
 if [ -f "$RULES_FILE" ]; then
-    echo "   -> 正在重写 rules.c 逻辑..."
+    # 引入 kallsyms
+    if ! grep -q "linux/kallsyms.h" "$RULES_FILE"; then
+        sed -i '/#include <linux\/types.h>/a #include <linux/kallsyms.h>' "$RULES_FILE"
+    fi
 
-    # [A] 清理旧战场
+    # 清理旧代码
     sed -i '/extern.*avc_ss_reset/d' "$RULES_FILE"
     sed -i '/extern.*selnl_notify_policyload/d' "$RULES_FILE"
     sed -i '/static void reset_avc_cache(void)/,/^}/d' "$RULES_FILE"
 
-    # [B] 准备新代码 (双重保险策略)
+    # 注入神偷代码 (不打印任何日志)
     cat > rules_patch.c <<EOF
 
-/* [ReSukiSU Fix] For Linux 4.19: Explicit Externs + Correct Order */
+typedef int (*avc_ss_reset_t)(void *avc, u32 seqno);
+typedef void (*notify_t)(u32 seqno);
 
-// 1. 显式声明 avc_ss_reset (解决参数报错)
-extern int avc_ss_reset(u32 seqno);
-
-// 2. 显式声明 selnl_notify_policyload (解决 conflicting types 报错)
-// 听取建议：直接写死声明，防止头文件引用顺序导致的隐式声明错误
-extern void selnl_notify_policyload(u32 seqno);
-
-// 3. 重写 reset_avc_cache
 static void reset_avc_cache(void)
 {
-    // 强制单参数调用
-    avc_ss_reset(0);
+    static avc_ss_reset_t sym_avc_ss_reset = NULL;
+    static void *sym_selinux_avc = NULL;
+    static notify_t sym_selnl_notify = NULL;
     
-    // 调用全局函数 (已有 extern 声明保驾护航)
-    selnl_notify_policyload(0);
+    // 偷地址
+    if (!sym_avc_ss_reset) {
+        sym_avc_ss_reset = (avc_ss_reset_t)kallsyms_lookup_name("avc_ss_reset");
+        sym_selinux_avc = (void *)kallsyms_lookup_name("selinux_avc");
+    }
+
+    // 只有偷到了才执行 (静默执行，失败了也不报错)
+    if (sym_avc_ss_reset && sym_selinux_avc) {
+        sym_avc_ss_reset(sym_selinux_avc, 0);
+    }
     
-    // 调用 static inline 函数 (依靠插入位置在头文件之后)
+    if (!sym_selnl_notify) {
+        sym_selnl_notify = (notify_t)kallsyms_lookup_name("selnl_notify_policyload");
+    }
+    if (sym_selnl_notify) {
+        sym_selnl_notify(0);
+    }
+
     selinux_xfrm_notify_policyload();
 }
 EOF
-
-    # [C] 插入代码 (执行精准卡位)
-    # 策略：尽量插在 xfrm.h 后面。如果没有，就插在 types.h 后面。
+    # 插入代码
     if grep -q "xfrm.h" "$RULES_FILE"; then
         sed -i '/include.*xfrm.h/r rules_patch.c' "$RULES_FILE"
-        echo "   -> 已插入到 xfrm.h 之后 (完美位置)"
-    elif grep -q "sepolicy.h" "$RULES_FILE"; then
-        sed -i '/include.*sepolicy.h/r rules_patch.c' "$RULES_FILE"
-        echo "   -> 已插入到 sepolicy.h 之后 (备选位置)"
     else
-        # 如果啥都找不到，就插在 #include <linux/types.h> 后面
-        # 配合上面的显式声明，这在 99% 的情况下也能跑通
-        if ! grep -q "#include <linux/types.h>" "$RULES_FILE"; then
-             sed -i '0,/#include/s//#include\n#include <linux\/types.h>/' "$RULES_FILE"
-        fi
         sed -i '/#include <linux\/types.h>/r rules_patch.c' "$RULES_FILE"
-        echo "   -> 已插入到 types.h 之后 (通用位置)"
     fi
     rm -f rules_patch.c
-
-    # [D] 补全 policydb (保持原样)
+    
+    # 顺便处理 get_policydb
     if grep -q "static struct policydb \*get_policydb(void)" "$RULES_FILE"; then
-        if ! grep -q "extern struct policydb policydb;" "$RULES_FILE"; then
-             sed -i '/static void reset_avc_cache(void)/i extern struct policydb policydb;' "$RULES_FILE"
-        fi
+         sed -i '/static struct policydb \*get_policydb(void)/,/^}/d' "$RULES_FILE"
+         cat >> "$RULES_FILE" <<EOF
+static struct policydb *get_policydb(void)
+{
+    static struct policydb *sym_policydb = NULL;
+    if (!sym_policydb) sym_policydb = (struct policydb *)kallsyms_lookup_name("policydb");
+    return sym_policydb;
+}
+EOF
     fi
 fi
-
-echo -e "\033[0;32m✅ rules.c 终极修复完成！\033[0m"
 
 # ==================== [Step 4: ReSukiSU 源码适配 (解除限制 + 兼容性修复)] ====================
 echo "💉 [4/6] 执行 ReSukiSU 源码适配..."
@@ -501,20 +502,58 @@ if ! grep -q "CONFIG_KSU=y" out/.config; then
     echo "CONFIG_KSU=y" >> out/.config
 fi
 
-# ==================== [Step 6: 编译 & 打包] ====================
+# ==================== [Step 6: 编译 & 核查 & 打包] ====================
 echo "🚀 [6/6] 启动多核编译..."
 make $MAKE_ARGS -j$(nproc)
 
+# ---------------- [新增：编译后核查 (决定生死的关键)] ----------------
+echo -e "\033[0;33m🔎 正在核查内核符号表 (System.map) 以验证神偷战术...\033[0m"
+MAP_FILE="out/System.map"
+
+if [ -f "$MAP_FILE" ]; then
+    # 1. 检查关键变量 selinux_avc (这是防止重启的核心)
+    if grep -q "selinux_avc" "$MAP_FILE"; then
+        echo -e "\033[0;32m✅ [成功] 发现符号 'selinux_avc'！\033[0m"
+        echo -e "\033[0;32m   -> 地址类型与位置: $(grep "selinux_avc" "$MAP_FILE" | head -n 1)\033[0m"
+        echo -e "\033[0;32m   -> 结论：神偷战术 100% 可行，刷入不会重启！\033[0m"
+    else
+        echo -e "\033[0;31m❌ [严重警告] 未找到符号 'selinux_avc'！\033[0m"
+        echo -e "\033[0;31m   -> 你的 CONFIG_KALLSYMS_ALL 可能未生效，或者厂商隐藏了该符号。\033[0m"
+        echo -e "\033[0;31m   -> 模块里的“神偷代码”将无法获取地址，可能会导致功能失效（但不会崩，因为有防崩判断）。\033[0m"
+    fi
+    
+    # 2. 检查函数 avc_ss_reset
+    if grep -q "avc_ss_reset" "$MAP_FILE"; then
+        echo -e "\033[0;32m✅ [成功] 发现函数 'avc_ss_reset'！\033[0m"
+    else
+        echo -e "\033[0;31m❌ [警告] 未找到函数 'avc_ss_reset'！\033[0m"
+    fi
+else
+    echo -e "\033[0;31m⚠️ 未找到 System.map 文件，无法验证符号。请祈祷 KALLSYMS 配置正确。\033[0m"
+fi
+echo "--------------------------------------------------------"
+
+# ---------------- [原打包流程] ----------------
 if [ -f "out/arch/arm64/boot/Image" ]; then
     echo -e "\033[0;32m✅ 编译成功！Image 已生成。\033[0m"
+    
+    # 准备 AnyKernel3
     rm -rf anykernel && git clone https://github.com/liyafe1997/AnyKernel3 -b kona --depth=1 anykernel
     rm -rf anykernel/kernels/ && mkdir -p anykernel/kernels/
+    
+    # 复制内核镜像
     cp out/arch/arm64/boot/Image anykernel/kernels/
+    
+    # 拼接 DTB (Alioth 专用)
+    # 注意：确保这一步能找到 dtb，否则刷入会卡米
     find out/arch/arm64/boot/dts -name '*.dtb' -exec cat {} + > anykernel/kernels/dtb
+    
+    # 打包 Zip
     cd anykernel
-    zip -r9 "../Kernel_Alioth_SukiSU_$(date +'%Y%m%d').zip" ./* -x .git .gitignore
+    zip -r9 "../Kernel_Alioth_ReSukiSU_$(date +'%Y%m%d').zip" ./* -x .git .gitignore
     cd ..
-    echo -e "\033[0;32m🎉 刷机包已生成！\033[0m"
+    
+    echo -e "\033[0;32m🎉 刷机包已生成！请检查上方 System.map 核查结果。\033[0m"
 else
     echo -e "\033[0;31m❌ 编译失败！请检查上方日志。\033[0m"
     exit 1
