@@ -278,42 +278,31 @@ echo -e "${Y}   -> [Linker Fix] 跳过 SELinux 钩子注入，防止 undefined r
 
 echo -e "${G}🎉 Hook 注入全部完成！${N}"
 
-# ==================== [Step 3.5: 终极分离修复 (ReSukiSU/SukiSU 通用)] ====================
-echo -e "\033[0;34m🔧 [3.5/6] 正在执行分离式逻辑注入 (解开死锁)...\033[0m"
+# ==================== [Step 3.5: 全静默内存扫描 (Silent Heuristic)] ====================
+echo -e "\033[0;34m🔧 [3.5/6] 正在注入静默扫描逻辑 (无日志版)...\033[0m"
 
-# 1. 修正 Drivers Makefile
+# 1. 修正 Drivers Makefile (常规操作)
 DRIVERS_MAKEFILE="drivers/Makefile"
 if [ -f "$DRIVERS_MAKEFILE" ]; then
     sed -i '/kernelsu/d' "$DRIVERS_MAKEFILE"
     echo "obj-y += kernelsu/" >> "$DRIVERS_MAKEFILE"
 fi
 
-# 2. 修正 rules.c
+# 2. 重写 rules.c (注入无日志扫描代码)
 RULES_FILE="drivers/kernelsu/selinux/rules.c"
 if [ -f "$RULES_FILE" ]; then
-    echo "   -> 正在重写 rules.c ..."
+    echo "   -> 正在注入运行时代码 (Range=64, Silent)..."
 
-    # [A] 清理旧代码 (斩草除根)
-    sed -i '/extern.*avc_ss_reset/d' "$RULES_FILE"
-    sed -i '/extern.*selnl_notify_policyload/d' "$RULES_FILE"
-    sed -i '/static void reset_avc_cache(void)/,/^}/d' "$RULES_FILE"
-    sed -i '/static struct policydb \*get_policydb(void)/,/^}/d' "$RULES_FILE"
-
-    # [B] 注入第 1 部分：前置声明 (Forward Declarations)
-    # 放在文件最顶部，解决 "get_policydb 找不到" 的问题
+    # [A] 头部声明
     cat > rules_head.c <<EOF
+#include <linux/kallsyms.h>
+#include <linux/slab.h>
 
-/* [KSU_FIX] Part 1: Forward Declarations */
-#include <linux/kallsyms.h> 
-
-// 提前告诉编译器这两个函数的存在
-struct policydb; 
+struct policydb;
 static struct policydb *get_policydb(void);
 static void reset_avc_cache(void);
-
 EOF
-
-    # 插入到 types.h 之后 (最前面)
+    # 插入头部
     if grep -q "#include <linux/types.h>" "$RULES_FILE"; then
         sed -i '/#include <linux\/types.h>/r rules_head.c' "$RULES_FILE"
     else
@@ -322,21 +311,48 @@ EOF
     fi
     rm -f rules_head.c
 
-    # [C] 注入第 2 部分：具体实现 (Implementation)
-    # 放在头文件之后，解决 "kallsyms/xfrm 类型冲突" 的问题
-    cat > rules_body.c <<EOF
+    # [B] 清理旧定义
+    sed -i '/extern.*avc_ss_reset/d' "$RULES_FILE"
+    sed -i '/extern.*selnl_notify_policyload/d' "$RULES_FILE"
+    sed -i '/static void reset_avc_cache(void)/,/^}/d' "$RULES_FILE"
+    sed -i '/static struct policydb \*get_policydb(void)/,/^}/d' "$RULES_FILE"
 
-/* [KSU_FIX] Part 2: Implementation */
+    # [C] 注入核心逻辑 (纯代码，无字符串)
+    cat > rules_body.c <<EOF
 
 typedef int (*avc_ss_reset_t)(void *avc, u32 seqno);
 typedef void (*notify_t)(u32 seqno);
 
+/* 扫描函数: 寻找特征值 512 */
+static void *find_ptr_via_state(void)
+{
+    void *state_ptr = (void *)kallsyms_lookup_name("selinux_state");
+    void **cursor;
+    int i;
+
+    if (!state_ptr) return NULL;
+
+    cursor = (void **)state_ptr;
+    
+    // 范围扩大到 128，确保万无一失
+    for (i = 0; i < 128; i++) {
+        void *candidate = cursor[i];
+        
+        // 过滤非内核地址
+        if ((unsigned long)candidate < 0xffff000000000000) continue;
+
+        // 特征匹配: 检查开头是否为 512
+        if (*(unsigned int *)candidate == 512) {
+            return candidate;
+        }
+    }
+    return NULL;
+}
+
 static struct policydb *get_policydb(void)
 {
     static struct policydb *sym_policydb = NULL;
-    if (!sym_policydb) {
-        sym_policydb = (struct policydb *)kallsyms_lookup_name("policydb");
-    }
+    if (!sym_policydb) sym_policydb = (struct policydb *)kallsyms_lookup_name("policydb");
     return sym_policydb;
 }
 
@@ -345,43 +361,36 @@ static void reset_avc_cache(void)
     static avc_ss_reset_t sym_avc_ss_reset = NULL;
     static void *sym_selinux_avc = NULL;
     static notify_t sym_selnl_notify = NULL;
+    static int scan_done = 0;
     
-    // 神偷战术：动态获取地址
-    if (!sym_avc_ss_reset) {
+    // 1. 动态查找 (只做一次)
+    if (!scan_done) {
         sym_avc_ss_reset = (avc_ss_reset_t)kallsyms_lookup_name("avc_ss_reset");
-        sym_selinux_avc = (void *)kallsyms_lookup_name("selinux_avc");
+        sym_selinux_avc = find_ptr_via_state();
+        scan_done = 1;
     }
 
+    // 2. 安全调用
     if (sym_avc_ss_reset && sym_selinux_avc) {
         sym_avc_ss_reset(sym_selinux_avc, 0);
     }
     
-    if (!sym_selnl_notify) {
-        sym_selnl_notify = (notify_t)kallsyms_lookup_name("selnl_notify_policyload");
-    }
-    if (sym_selnl_notify) {
-        sym_selnl_notify(0);
-    }
+    // 3. 通知
+    if (!sym_selnl_notify) sym_selnl_notify = (notify_t)kallsyms_lookup_name("selnl_notify_policyload");
+    if (sym_selnl_notify) sym_selnl_notify(0);
 
-    // 这里已经是头文件之后了，可以直接调用 static inline 函数
     selinux_xfrm_notify_policyload();
 }
 EOF
-
-    # 插入到 xfrm.h 之后 (中间位置)
-    # 如果找不到 xfrm.h，就尝试 sepolicy.h，再不行就插在 include 块的末尾
+    # 插入代码
     if grep -q "xfrm.h" "$RULES_FILE"; then
         sed -i '/include.*xfrm.h/r rules_body.c' "$RULES_FILE"
-    elif grep -q "sepolicy.h" "$RULES_FILE"; then
-        sed -i '/include.*sepolicy.h/r rules_body.c' "$RULES_FILE"
     else
-        # 最后的手段：插在第 50 行左右
         sed -i '50r rules_body.c' "$RULES_FILE"
     fi
     rm -f rules_body.c
 fi
-
-echo -e "\033[0;32m✅ 修复完成！(采用声明分离战术)\033[0m"
+echo -e "\033[0;32m✅ 静默扫描逻辑注入完成 (Clean & Silent)！\033[0m"
 
 # ==================== [Step 4: ReSukiSU 源码适配 (解除限制 + 兼容性修复)] ====================
 echo "💉 [4/6] 执行 ReSukiSU 源码适配..."
