@@ -339,8 +339,8 @@ static void *find_ptr_via_state(void)
     if (!state_ptr) return NULL;
 
     cursor = (void **)state_ptr;
-    // 范围 64，绝对稳
-    for (i = 0; i < 64; i++) {
+    // 范围 128，绝对稳
+    for (i = 0; i < 128; i++) {
         void *candidate = cursor[i];
         if ((unsigned long)candidate < 0xffff000000000000) continue;
         if (*(unsigned int *)candidate == 512) {
