@@ -278,125 +278,78 @@ echo -e "${Y}   -> [Linker Fix] 跳过 SELinux 钩子注入，防止 undefined r
 
 echo -e "${G}🎉 Hook 注入全部完成！${N}"
 
-# ==================== [Step 3.5: 完美融合版 (分离结构 + 静默扫描)] ====================
-echo -e "\033[0;34m🔧 [3.5/6] 正在执行完美融合适配 (编译修复+静默扫描)...\033[0m"
+# ==================== [Step 3.5: 变量桥接与链接修复 (修复版)] ====================
+echo "🔧 [3.5/6] 正在执行变量桥接与冲突修复..."
 
-# 1. 修正 Drivers Makefile
+# 1. 强制 drivers/Makefile 包含 kernelsu
 DRIVERS_MAKEFILE="drivers/Makefile"
 if [ -f "$DRIVERS_MAKEFILE" ]; then
     sed -i '/kernelsu/d' "$DRIVERS_MAKEFILE"
     echo "obj-y += kernelsu/" >> "$DRIVERS_MAKEFILE"
 fi
 
-# 2. 修正 rules.c
-RULES_FILE="drivers/kernelsu/selinux/rules.c"
-if [ -f "$RULES_FILE" ]; then
-    echo "   -> 正在重写 rules.c (分离式注入 + 内存扫描)..."
-
-    # [A] 清理旧代码 (既然你验证了这步在 SukiSU 上没报错，我们就保留它)
-    sed -i '/extern.*avc_ss_reset/d' "$RULES_FILE"
-    sed -i '/extern.*selnl_notify_policyload/d' "$RULES_FILE"
-    sed -i '/static void reset_avc_cache(void)/,/^}/d' "$RULES_FILE"
-    sed -i '/static struct policydb \*get_policydb(void)/,/^}/d' "$RULES_FILE"
-
-    # [B] 注入第 1 部分：前置声明 (Headers & Declarations)
-    # 这一步解决了编译报错
-    cat > rules_head.c <<EOF
-/* [KSU_FIX] Headers & Forward Decls */
-#include <linux/kallsyms.h>
-#include <linux/slab.h> 
-
-struct policydb;
-static struct policydb *get_policydb(void);
-static void reset_avc_cache(void);
-EOF
-
-    # 插入到 types.h 之后
-    if grep -q "#include <linux/types.h>" "$RULES_FILE"; then
-        sed -i '/#include <linux\/types.h>/r rules_head.c' "$RULES_FILE"
-    else
-        sed -i '0,/#include/s//#include\n#include <linux\/types.h>/' "$RULES_FILE"
-        sed -i '/#include <linux\/types.h>/r rules_head.c' "$RULES_FILE"
+# 2. 桥接 Policydb
+SERVICES_FILE="security/selinux/ss/services.c"
+if [ -f "$SERVICES_FILE" ]; then
+    if ! grep -q "linux/export.h" "$SERVICES_FILE"; then
+        sed -i '/#include <linux\/kernel.h>/a #include <linux/export.h>' "$SERVICES_FILE"
     fi
-    rm -f rules_head.c
+    if ! grep -q "ksu_policydb_ptr" "$SERVICES_FILE"; then
+        cat >> "$SERVICES_FILE" <<EOF
 
-    # [C] 注入第 2 部分：具体实现 (Implementation with Scanner)
-    # 这一步解决了“私有变量找不到”的问题
-    cat > rules_body.c <<EOF
-
-/* [KSU_FIX] Implementation: Silent Heuristic Scanner */
-
-typedef int (*avc_ss_reset_t)(void *avc, u32 seqno);
-typedef void (*notify_t)(u32 seqno);
-
-// 扫描函数: 寻找特征值 512 (Range=64)
-static void *find_ptr_via_state(void)
-{
-    void *state_ptr = (void *)kallsyms_lookup_name("selinux_state");
-    void **cursor;
-    int i;
-
-    if (!state_ptr) return NULL;
-
-    cursor = (void **)state_ptr;
-    // 范围 128，绝对稳
-    for (i = 0; i < 128; i++) {
-        void *candidate = cursor[i];
-        if ((unsigned long)candidate < 0xffff000000000000) continue;
-        if (*(unsigned int *)candidate == 512) {
-            return candidate;
-        }
-    }
-    return NULL;
-}
-
-static struct policydb *get_policydb(void)
-{
-    static struct policydb *sym_policydb = NULL;
-    if (!sym_policydb) sym_policydb = (struct policydb *)kallsyms_lookup_name("policydb");
-    return sym_policydb;
-}
-
-static void reset_avc_cache(void)
-{
-    static avc_ss_reset_t sym_avc_ss_reset = NULL;
-    static void *sym_selinux_avc = NULL;
-    static notify_t sym_selnl_notify = NULL;
-    static int scan_done = 0;
-    
-    // 1. 动态查找 + 扫描 (只做一次)
-    if (!scan_done) {
-        sym_avc_ss_reset = (avc_ss_reset_t)kallsyms_lookup_name("avc_ss_reset");
-        // 核心改动：用扫描替代直接查找
-        sym_selinux_avc = find_ptr_via_state();
-        scan_done = 1;
-    }
-
-    // 2. 只有找到了才执行 (防崩)
-    if (sym_avc_ss_reset && sym_selinux_avc) {
-        sym_avc_ss_reset(sym_selinux_avc, 0);
-    }
-    
-    // 3. 通知
-    if (!sym_selnl_notify) sym_selnl_notify = (notify_t)kallsyms_lookup_name("selnl_notify_policyload");
-    if (sym_selnl_notify) sym_selnl_notify(0);
-
-    selinux_xfrm_notify_policyload();
-}
+struct policydb *ksu_policydb_ptr = &selinux_ss.policydb;
+EXPORT_SYMBOL(ksu_policydb_ptr);
 EOF
-
-    # 插入到 xfrm.h 之后
-    if grep -q "xfrm.h" "$RULES_FILE"; then
-        sed -i '/include.*xfrm.h/r rules_body.c' "$RULES_FILE"
-    elif grep -q "sepolicy.h" "$RULES_FILE"; then
-        sed -i '/include.*sepolicy.h/r rules_body.c' "$RULES_FILE"
-    else
-        sed -i '50r rules_body.c' "$RULES_FILE"
     fi
-    rm -f rules_body.c
 fi
 
-echo -e "\033[0;32m✅ 融合修复完成！(编译通过 + 功能满血 + 极度隐匿)\033[0m"
+# 3. 桥接 AVC
+AVC_FILE="security/selinux/avc.c"
+if [ -f "$AVC_FILE" ]; then
+    if ! grep -q "linux/export.h" "$AVC_FILE"; then
+        sed -i '/#include <linux\/types.h>/a #include <linux/export.h>' "$AVC_FILE"
+    fi
+    if ! grep -q "ksu_selinux_avc_ptr" "$AVC_FILE"; then
+        cat >> "$AVC_FILE" <<EOF
+
+struct selinux_avc *ksu_selinux_avc_ptr = &selinux_avc;
+EXPORT_SYMBOL(ksu_selinux_avc_ptr);
+EOF
+    fi
+fi
+
+# 4. 适配 rules.c (修复参数报错)
+RULES_FILE="drivers/kernelsu/selinux/rules.c"
+if [ -f "$RULES_FILE" ]; then
+    echo "   -> 修复 drivers/kernelsu/selinux/rules.c ..."
+    
+    # 替换 get_policydb 实现
+    if grep -q "static struct policydb \*get_policydb(void)" "$RULES_FILE"; then
+       sed -i '/static struct policydb \*get_policydb(void)/,/^}/c\
+extern struct policydb *ksu_policydb_ptr;\
+static struct policydb *get_policydb(void)\
+{\
+    return ksu_policydb_ptr;\
+}' "$RULES_FILE"
+    fi
+    
+    # 【修复重点】修正 reset_avc_cache 参数
+    # 将 selnl_notify_policyload(NULL, 0) 改为 selnl_notify_policyload(0)
+    if grep -q "static void reset_avc_cache(void)" "$RULES_FILE"; then
+        sed -i '/static void reset_avc_cache(void)/,/^}/c\
+extern struct selinux_avc *ksu_selinux_avc_ptr;\
+extern int avc_ss_reset(struct selinux_avc *avc, u32 seqno);\
+static void reset_avc_cache(void)\
+{\
+    avc_ss_reset(ksu_selinux_avc_ptr, 0);\
+    selnl_notify_policyload(0);\
+    selinux_xfrm_notify_policyload();\
+}' "$RULES_FILE"
+    fi
+fi
+
+echo "   ✅ 桥接与修复全部完成！(已修正 rules.c 参数错误)"
+
 
 # ==================== [Step 4: ReSukiSU 源码适配 (解除限制 + 兼容性修复)] ====================
 echo "💉 [4/6] 执行 ReSukiSU 源码适配..."
@@ -546,59 +499,104 @@ if ! grep -q "CONFIG_KSU=y" out/.config; then
     echo "CONFIG_KSU=y" >> out/.config
 fi
 
-# ==================== [Step 6: 编译 & 核查 & 打包] ====================
-echo "🚀 [6/6] 启动多核编译..."
+# ==================== [Step 6: 编译、修补与打包 (可视化增强版)] ====================
+echo -e "\033[0;34m🚀 [6/6] 启动最终编译流程 (含 KPM 修补 + 桥接核查)...\033[0m"
+
+# --- 1. 执行编译 ---
+# 保留标准输出，这样你能看到进度条，不至于对着黑屏发呆
 make $MAKE_ARGS -j$(nproc)
 
-# ---------------- [新增：编译后核查 (决定生死的关键)] ----------------
-echo -e "\033[0;33m🔎 正在核查内核符号表 (System.map) 以验证神偷战术...\033[0m"
-MAP_FILE="out/System.map"
-
-if [ -f "$MAP_FILE" ]; then
-    # 1. 检查关键变量 selinux_avc (这是防止重启的核心)
-    if grep -q "selinux_avc" "$MAP_FILE"; then
-        echo -e "\033[0;32m✅ [成功] 发现符号 'selinux_avc'！\033[0m"
-        echo -e "\033[0;32m   -> 地址类型与位置: $(grep "selinux_avc" "$MAP_FILE" | head -n 1)\033[0m"
-        echo -e "\033[0;32m   -> 结论：神偷战术 100% 可行，刷入不会重启！\033[0m"
-    else
-        echo -e "\033[0;31m❌ [严重警告] 未找到符号 'selinux_avc'！\033[0m"
-        echo -e "\033[0;31m   -> 你的 CONFIG_KALLSYMS_ALL 可能未生效，或者厂商隐藏了该符号。\033[0m"
-        echo -e "\033[0;31m   -> 模块里的“神偷代码”将无法获取地址，可能会导致功能失效（但不会崩，因为有防崩判断）。\033[0m"
-    fi
-    
-    # 2. 检查函数 avc_ss_reset
-    if grep -q "avc_ss_reset" "$MAP_FILE"; then
-        echo -e "\033[0;32m✅ [成功] 发现函数 'avc_ss_reset'！\033[0m"
-    else
-        echo -e "\033[0;31m❌ [警告] 未找到函数 'avc_ss_reset'！\033[0m"
-    fi
-else
-    echo -e "\033[0;31m⚠️ 未找到 System.map 文件，无法验证符号。请祈祷 KALLSYMS 配置正确。\033[0m"
-fi
-echo "--------------------------------------------------------"
-
-# ---------------- [原打包流程] ----------------
+# --- 2. 核心产物检查 ---
 if [ -f "out/arch/arm64/boot/Image" ]; then
-    echo -e "\033[0;32m✅ 编译成功！Image 已生成。\033[0m"
+    echo -e "\033[0;32m✅ [编译成功] 内核镜像 Image 已顺利生成！\033[0m"
     
-    # 准备 AnyKernel3
-    rm -rf anykernel && git clone https://github.com/liyafe1997/AnyKernel3 -b kona --depth=1 anykernel
+    # --- [3. KPM 二进制修补 (SukiSU 核心)] ---
+    # 自动检测 .config 是否开启了 KPM，开了才修补，没开自动跳过
+    if grep -q "CONFIG_KPM=y" out/.config; then
+        echo -e "\033[0;33m🔧 [KPM] 检测到 KPM 配置已开启，准备执行修补...\033[0m"
+        
+        cd out/arch/arm64/boot/ || exit 1
+        
+        # [3.1] 下载工具
+        if [ ! -f "patch_linux" ]; then
+            echo "   ⬇️ 正在下载修补工具 (patch_linux)..."
+            wget -q https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch/releases/download/0.12.2/patch_linux
+        fi
+        
+        # [3.2] 执行修补
+        if [ -f "patch_linux" ]; then
+            chmod +x patch_linux
+            ./patch_linux > /dev/null 2>&1 # 静默执行，只看结果
+            
+            # [3.3] 验证修补结果
+            if [ -f "oImage" ]; then
+                echo -e "\033[0;32m   ✅ [KPM成功] 补丁注入完成！正在替换内核镜像...\033[0m"
+                mv Image Image.bak
+                mv oImage Image
+                rm -f patch_linux
+            else
+                echo -e "\033[0;31m   ❌ [KPM失败] 工具运行了但没吐出新镜像 (oImage 未生成)。\033[0m"
+                echo -e "\033[0;33m      ⚠️ 将使用原版 Image 打包 (Root 功能可能受限)。\033[0m"
+            fi
+        else
+            echo -e "\033[0;31m   ❌ [下载失败] 无法获取 patch_linux 工具，跳过修补！\033[0m"
+        fi
+        cd - > /dev/null
+    else
+        echo -e "\033[0;36mℹ️ [提示] KPM 未开启，跳过二进制修补步骤。\033[0m"
+    fi
+
+    # --- [4. 桥接模式生效核查 (让你可以放心刷入)] ---
+    # 这里只检查 Step 3.5 是否生效，如果不生效，刷了也没 Root
+    SYSTEM_MAP="out/System.map"
+    if [ -f "$SYSTEM_MAP" ]; then
+        echo "🔎 [核查] 正在检查变量导出状态..."
+        
+        # 查变量 ksu_selinux_avc_ptr
+        if grep -q "ksu_selinux_avc_ptr" "$SYSTEM_MAP"; then
+            echo -e "\033[0;32m   ✅ [变量导出] 成功找到 'ksu_selinux_avc_ptr' (Root 稳了)\033[0m"
+        else
+            echo -e "\033[0;31m   ❌ [严重警告] 未找到 'ksu_selinux_avc_ptr'！Step 3.5 可能未生效！\033[0m"
+        fi
+
+        # 查函数 avc_ss_reset (SukiSU 需要它是全局的)
+        if grep "avc_ss_reset" "$SYSTEM_MAP" | grep -q -v " t "; then
+             echo -e "\033[0;32m   ✅ [函数解锁] 'avc_ss_reset' 已解除私有限制。\033[0m"
+        else
+             echo -e "\033[0;33m   ⚠️ [注意] 'avc_ss_reset' 仍是局部符号 (ReSukiSU 可忽略，SukiSU 请留意)。\033[0m"
+        fi
+    fi
+
+    # --- [5. 打包 AnyKernel3] ---
+    echo "📦 [打包] 正在生成刷机包..."
+    
+    # 清理旧环境
+    rm -rf anykernel && git clone https://github.com/liyafe1997/AnyKernel3 -b kona --depth=1 anykernel > /dev/null 2>&1
     rm -rf anykernel/kernels/ && mkdir -p anykernel/kernels/
     
-    # 复制内核镜像
+    # 拷贝核心 (Image 此时已经是修补过的了)
     cp out/arch/arm64/boot/Image anykernel/kernels/
     
-    # 拼接 DTB (Alioth 专用)
-    # 注意：确保这一步能找到 dtb，否则刷入会卡米
+    # 合并 DTB (Alioth/Kona 必需步骤)
+    echo "   📄 正在合并 DTB 文件..."
     find out/arch/arm64/boot/dts -name '*.dtb' -exec cat {} + > anykernel/kernels/dtb
     
-    # 打包 Zip
+    # 生成文件名 (带日期和 KPM 标识)
     cd anykernel
-    zip -r9 "../Kernel_Alioth_ReSukiSU_$(date +'%Y%m%d').zip" ./* -x .git .gitignore
+    KPM_TAG=""
+    if grep -q "CONFIG_KPM=y" ../out/.config; then KPM_TAG="_KPM"; fi
+    ZIP_NAME="Kernel_${TARGET_DEVICE}_ReSukiSU${KPM_TAG}_$(date +'%Y%m%d_%H%M%S').zip"
+    
+    # 压缩
+    zip -q -r9 "../$ZIP_NAME" ./* -x .git .gitignore
     cd ..
     
-    echo -e "\033[0;32m🎉 刷机包已生成！请检查上方 System.map 核查结果。\033[0m"
+    echo "--------------------------------------------------------"
+    echo -e "\033[0;32m🎉 [大功告成] 刷机包已生成：\033[0m"
+    echo -e "\033[0;32m   👉 ./$ZIP_NAME\033[0m"
+    echo -e "\033[0;36m💡 提示：此包已包含 变量导出 + KPM修补，理论上开机即用。\033[0m"
 else
-    echo -e "\033[0;31m❌ 编译失败！请检查上方日志。\033[0m"
+    echo -e "\033[0;31m❌ [致命错误] 编译失败！Image 文件未生成。\033[0m"
+    echo -e "\033[0;31m   -> 请向上翻阅日志查看具体报错原因。\033[0m"
     exit 1
 fi
