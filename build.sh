@@ -278,77 +278,89 @@ echo -e "${Y}   -> [Linker Fix] 跳过 SELinux 钩子注入，防止 undefined r
 
 echo -e "${G}🎉 Hook 注入全部完成！${N}"
 
-# ==================== [Step 3.5: 变量桥接与链接修复 (修复版)] ====================
-echo "🔧 [3.5/6] 正在执行变量桥接与冲突修复..."
+# ==================== [Step 3.5: 幽灵直连版 (Policydb + AVC)] ====================
+echo "🔧 [3.5/6] 正在执行幽灵直连适配 (无 KSU 变量版)..."
 
-# 1. 强制 drivers/Makefile 包含 kernelsu
-DRIVERS_MAKEFILE="drivers/Makefile"
-if [ -f "$DRIVERS_MAKEFILE" ]; then
-    sed -i '/kernelsu/d' "$DRIVERS_MAKEFILE"
-    echo "obj-y += kernelsu/" >> "$DRIVERS_MAKEFILE"
+# 1. 强制编译进内核
+if [ -f "drivers/Makefile" ]; then
+    sed -i '/kernelsu/d' "drivers/Makefile"
+    echo "obj-y += kernelsu/" >> "drivers/Makefile"
 fi
 
-# 2. 桥接 Policydb
+# 2. 解锁 services.c (Policydb 的家)
 SERVICES_FILE="security/selinux/ss/services.c"
 if [ -f "$SERVICES_FILE" ]; then
-    if ! grep -q "linux/export.h" "$SERVICES_FILE"; then
-        sed -i '/#include <linux\/kernel.h>/a #include <linux/export.h>' "$SERVICES_FILE"
-    fi
-    if ! grep -q "ksu_policydb_ptr" "$SERVICES_FILE"; then
-        cat >> "$SERVICES_FILE" <<EOF
-
-struct policydb *ksu_policydb_ptr = &selinux_ss.policydb;
-EXPORT_SYMBOL(ksu_policydb_ptr);
-EOF
-    fi
+    echo "   -> 解锁 selinux_ss 可见性..."
+    # 把 static struct selinux_ss selinux_ss 去掉 static
+    sed -i 's/static[[:space:]]*struct[[:space:]]*selinux_ss[[:space:]]*selinux_ss/struct selinux_ss selinux_ss/g' "$SERVICES_FILE"
+    # 不用 EXPORT_SYMBOL，Linker 自己会找
 fi
 
-# 3. 桥接 AVC
+# 3. 解锁 avc.c (AVC 的家)
 AVC_FILE="security/selinux/avc.c"
 if [ -f "$AVC_FILE" ]; then
-    if ! grep -q "linux/export.h" "$AVC_FILE"; then
-        sed -i '/#include <linux\/types.h>/a #include <linux/export.h>' "$AVC_FILE"
-    fi
-    if ! grep -q "ksu_selinux_avc_ptr" "$AVC_FILE"; then
-        cat >> "$AVC_FILE" <<EOF
-
-struct selinux_avc *ksu_selinux_avc_ptr = &selinux_avc;
-EXPORT_SYMBOL(ksu_selinux_avc_ptr);
-EOF
-    fi
+    echo "   -> 解锁 selinux_avc 可见性..."
+    sed -i 's/static[[:space:]]*struct[[:space:]]*selinux_avc[[:space:]]*selinux_avc/struct selinux_avc selinux_avc/g' "$AVC_FILE"
+    sed -i 's/static[[:space:]]*int[[:space:]]*avc_ss_reset/int avc_ss_reset/g' "$AVC_FILE"
 fi
 
-# 4. 适配 rules.c (修复参数报错)
+# 4. 适配 rules.c (直接引用原生变量)
 RULES_FILE="drivers/kernelsu/selinux/rules.c"
 if [ -f "$RULES_FILE" ]; then
-    echo "   -> 修复 drivers/kernelsu/selinux/rules.c ..."
+    echo "   -> 适配 rules.c 使用原生直连..."
+
+    # [A] 清理旧代码
+    sed -i '/extern.*avc_ss_reset/d' "$RULES_FILE"
+    sed -i '/static void reset_avc_cache(void)/,/^}/d' "$RULES_FILE"
+    sed -i '/static struct policydb \*get_policydb(void)/,/^}/d' "$RULES_FILE"
+
+    # [B] 注入声明 (告诉编译器原厂变量长啥样)
+    cat > rules_head.c <<EOF
+/* [KSU] Native Definitions */
+#include <linux/kallsyms.h>
+
+struct selinux_avc;
+struct policydb;
+struct selinux_ss {
+    struct policydb policydb; // 我们只需要这个成员
+    // 其他成员省略，编译器只需要偏移量
+    void *dummy; 
+};
+
+// 引用解锁后的原生变量
+extern struct selinux_ss selinux_ss;
+extern struct selinux_avc selinux_avc;
+extern int avc_ss_reset(struct selinux_avc *avc, u32 seqno);
+
+static struct policydb *get_policydb(void)
+{
+    // 直接从原生结构体里取！
+    return &selinux_ss.policydb;
+}
+
+static void reset_avc_cache(void)
+{
+    // 直接传原生变量！
+    avc_ss_reset(&selinux_avc, 0);
     
-    # 替换 get_policydb 实现
-    if grep -q "static struct policydb \*get_policydb(void)" "$RULES_FILE"; then
-       sed -i '/static struct policydb \*get_policydb(void)/,/^}/c\
-extern struct policydb *ksu_policydb_ptr;\
-static struct policydb *get_policydb(void)\
-{\
-    return ksu_policydb_ptr;\
-}' "$RULES_FILE"
-    fi
+    // 通知部分保持 kallsyms 兜底
+    void (*notify)(int) = (void *)kallsyms_lookup_name("selnl_notify_policyload");
+    if (notify) notify(0);
+    selinux_xfrm_notify_policyload();
+}
+EOF
     
-    # 【修复重点】修正 reset_avc_cache 参数
-    # 将 selnl_notify_policyload(NULL, 0) 改为 selnl_notify_policyload(0)
-    if grep -q "static void reset_avc_cache(void)" "$RULES_FILE"; then
-        sed -i '/static void reset_avc_cache(void)/,/^}/c\
-extern struct selinux_avc *ksu_selinux_avc_ptr;\
-extern int avc_ss_reset(struct selinux_avc *avc, u32 seqno);\
-static void reset_avc_cache(void)\
-{\
-    avc_ss_reset(ksu_selinux_avc_ptr, 0);\
-    selnl_notify_policyload(0);\
-    selinux_xfrm_notify_policyload();\
-}' "$RULES_FILE"
+    # 插入代码
+    sed -i '1i #include <linux/types.h>' "$RULES_FILE"
+    if grep -q "xfrm.h" "$RULES_FILE"; then
+        sed -i '/include.*xfrm.h/r rules_head.c' "$RULES_FILE"
+    else
+        sed -i '50r rules_head.c' "$RULES_FILE"
     fi
+    rm -f rules_head.c
 fi
 
-echo "   ✅ 桥接与修复全部完成！(已修正 rules.c 参数错误)"
+echo "✅ 适配完成！完全依赖原生变量，无 KSU 特征变量。"
 
 
 # ==================== [Step 4: ReSukiSU 源码适配 (解除限制 + 兼容性修复)] ====================
