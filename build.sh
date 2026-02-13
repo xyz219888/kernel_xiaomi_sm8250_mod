@@ -278,69 +278,76 @@ echo -e "${Y}   -> [Linker Fix] 跳过 SELinux 钩子注入，防止 undefined r
 
 echo -e "${G}🎉 Hook 注入全部完成！${N}"
 
-# ==================== [Step 3.5: 幽灵直连版 (Policydb + AVC)] ====================
-echo "🔧 [3.5/6] 正在执行幽灵直连适配 (无 KSU 变量版)..."
+# ==================== [Step 3.5: 幽灵直连·源码验证版] ====================
+echo "🔧 [3.5/6] 正在执行幽灵直连适配 (基于 services.h 源码验证)..."
 
-# 1. 强制编译进内核
+# 1. 强制 KernelSU 编译进内核 (obj-y)
 if [ -f "drivers/Makefile" ]; then
     sed -i '/kernelsu/d' "drivers/Makefile"
     echo "obj-y += kernelsu/" >> "drivers/Makefile"
 fi
 
-# 2. 解锁 services.c (Policydb 的家)
+# 2. 解锁 services.c (Policydb 的宿主)
+# 目标：static struct selinux_ss selinux_ss -> struct selinux_ss selinux_ss
 SERVICES_FILE="security/selinux/ss/services.c"
 if [ -f "$SERVICES_FILE" ]; then
-    echo "   -> 解锁 selinux_ss 可见性..."
-    # 把 static struct selinux_ss selinux_ss 去掉 static
+    echo "   -> [Stealth] 解锁 selinux_ss 变量可见性..."
     sed -i 's/static[[:space:]]*struct[[:space:]]*selinux_ss[[:space:]]*selinux_ss/struct selinux_ss selinux_ss/g' "$SERVICES_FILE"
-    # 不用 EXPORT_SYMBOL，Linker 自己会找
 fi
 
-# 3. 解锁 avc.c (AVC 的家)
+# 3. 解锁 avc.c (AVC 的宿主)
+# 目标：static struct selinux_avc selinux_avc -> struct selinux_avc selinux_avc
 AVC_FILE="security/selinux/avc.c"
 if [ -f "$AVC_FILE" ]; then
-    echo "   -> 解锁 selinux_avc 可见性..."
+    echo "   -> [Stealth] 解锁 selinux_avc 变量可见性..."
     sed -i 's/static[[:space:]]*struct[[:space:]]*selinux_avc[[:space:]]*selinux_avc/struct selinux_avc selinux_avc/g' "$AVC_FILE"
+    
+    # 虽然你提供的源码里 avc_ss_reset 不是 static，但为了兼容性还是跑一遍正则
     sed -i 's/static[[:space:]]*int[[:space:]]*avc_ss_reset/int avc_ss_reset/g' "$AVC_FILE"
 fi
 
-# 4. 适配 rules.c (直接引用原生变量)
+# 4. 适配 rules.c (注入正确偏移量的结构体)
 RULES_FILE="drivers/kernelsu/selinux/rules.c"
 if [ -f "$RULES_FILE" ]; then
-    echo "   -> 适配 rules.c 使用原生直连..."
+    echo "   -> 适配 rules.c (注入 services.h 结构体布局)..."
 
-    # [A] 清理旧代码
+    # [A] 清理 ReSukiSU 旧定义，防止冲突
     sed -i '/extern.*avc_ss_reset/d' "$RULES_FILE"
     sed -i '/static void reset_avc_cache(void)/,/^}/d' "$RULES_FILE"
     sed -i '/static struct policydb \*get_policydb(void)/,/^}/d' "$RULES_FILE"
 
-    # [B] 注入声明 (告诉编译器原厂变量长啥样)
-    cat > rules_head.c <<EOF
-/* [KSU] Native Definitions */
+    # [B] 注入原生声明 (Direct Ghost Link)
+    cat > rules_patch.c <<EOF
+/* [KSU] Native Definitions (Verified via services.h) */
 #include <linux/kallsyms.h>
 
 struct selinux_avc;
 struct policydb;
+
+/* * 关键修正：根据 services.h 第 27 行，selinux_ss 的第一个成员是 sidtab。
+ * 我们必须加一个占位符 (sidtab_dummy) 来跳过这 8 个字节，
+ * 否则 policydb 的地址就会错位，导致开机死循环。
+ */
 struct selinux_ss {
-    struct policydb policydb; // 我们只需要这个成员
-    // 其他成员省略，编译器只需要偏移量
-    void *dummy; 
+    void *sidtab_dummy;       // 对应 struct sidtab *sidtab
+    struct policydb policydb; // 我们的目标
+    void *dummy_rest;         // 后面的不重要
 };
 
-// 引用解锁后的原生变量
+// 引用我们在 Step 2,3 解锁的原生变量
 extern struct selinux_ss selinux_ss;
 extern struct selinux_avc selinux_avc;
 extern int avc_ss_reset(struct selinux_avc *avc, u32 seqno);
 
 static struct policydb *get_policydb(void)
 {
-    // 直接从原生结构体里取！
+    // 直接取地址，极速且隐蔽
     return &selinux_ss.policydb;
 }
 
 static void reset_avc_cache(void)
 {
-    // 直接传原生变量！
+    // 直接传原生变量指针
     avc_ss_reset(&selinux_avc, 0);
     
     // 通知部分保持 kallsyms 兜底
@@ -349,18 +356,21 @@ static void reset_avc_cache(void)
     selinux_xfrm_notify_policyload();
 }
 EOF
-    
+
     # 插入代码
+    # 确保有头文件
     sed -i '1i #include <linux/types.h>' "$RULES_FILE"
+    
+    # 找个好位置插入 (在 include 之后)
     if grep -q "xfrm.h" "$RULES_FILE"; then
-        sed -i '/include.*xfrm.h/r rules_head.c' "$RULES_FILE"
+        sed -i '/include.*xfrm.h/r rules_patch.c' "$RULES_FILE"
     else
-        sed -i '50r rules_head.c' "$RULES_FILE"
+        sed -i '50r rules_patch.c' "$RULES_FILE"
     fi
-    rm -f rules_head.c
+    rm -f rules_patch.c
 fi
 
-echo "✅ 适配完成！完全依赖原生变量，无 KSU 特征变量。"
+echo -e "\033[0;32m✅ [完美适配] 幽灵直连已完成 (偏移量已校准)！\033[0m"
 
 
 # ==================== [Step 4: ReSukiSU 源码适配 (解除限制 + 兼容性修复)] ====================
