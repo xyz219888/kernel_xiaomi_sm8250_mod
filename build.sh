@@ -278,79 +278,80 @@ echo -e "${Y}   -> [Linker Fix] 跳过 SELinux 钩子注入，防止 undefined r
 
 echo -e "${G}🎉 Hook 注入全部完成！${N}"
 
-# ==================== [Step 3.5: 幽灵直连·源码验证版] ====================
-echo "🔧 [3.5/6] 正在执行幽灵直连适配 (基于 services.h 源码验证)..."
+# ==================== [Step 3.5: 幽灵直连·类型安全版] ====================
+echo "🔧 [3.5/6] 正在执行幽灵直连适配 (Type-Safe Pointer Arithmetic)..."
 
-# 1. 强制 KernelSU 编译进内核 (obj-y)
+# 1. 强制 KernelSU 编译进内核
 if [ -f "drivers/Makefile" ]; then
     sed -i '/kernelsu/d' "drivers/Makefile"
     echo "obj-y += kernelsu/" >> "drivers/Makefile"
 fi
 
 # 2. 解锁 services.c (Policydb 的宿主)
-# 目标：static struct selinux_ss selinux_ss -> struct selinux_ss selinux_ss
 SERVICES_FILE="security/selinux/ss/services.c"
 if [ -f "$SERVICES_FILE" ]; then
     echo "   -> [Stealth] 解锁 selinux_ss 变量可见性..."
+    # 移除 static，使其变为全局符号，供 rules.c 链接
     sed -i 's/static[[:space:]]*struct[[:space:]]*selinux_ss[[:space:]]*selinux_ss/struct selinux_ss selinux_ss/g' "$SERVICES_FILE"
 fi
 
 # 3. 解锁 avc.c (AVC 的宿主)
-# 目标：static struct selinux_avc selinux_avc -> struct selinux_avc selinux_avc
 AVC_FILE="security/selinux/avc.c"
 if [ -f "$AVC_FILE" ]; then
     echo "   -> [Stealth] 解锁 selinux_avc 变量可见性..."
     sed -i 's/static[[:space:]]*struct[[:space:]]*selinux_avc[[:space:]]*selinux_avc/struct selinux_avc selinux_avc/g' "$AVC_FILE"
-    
-    # 虽然你提供的源码里 avc_ss_reset 不是 static，但为了兼容性还是跑一遍正则
+    # 确保函数也是全局的
     sed -i 's/static[[:space:]]*int[[:space:]]*avc_ss_reset/int avc_ss_reset/g' "$AVC_FILE"
 fi
 
-# 4. 适配 rules.c (注入正确偏移量的结构体)
+# 4. 适配 rules.c (使用类型安全的指针偏移)
 RULES_FILE="drivers/kernelsu/selinux/rules.c"
 if [ -f "$RULES_FILE" ]; then
-    echo "   -> 适配 rules.c (注入 services.h 结构体布局)..."
+    echo "   -> 适配 rules.c (C标准兼容的地址偏移)..."
 
-    # [A] 清理 ReSukiSU 旧定义，防止冲突
+    # [A] 清理旧代码
     sed -i '/extern.*avc_ss_reset/d' "$RULES_FILE"
     sed -i '/static void reset_avc_cache(void)/,/^}/d' "$RULES_FILE"
     sed -i '/static struct policydb \*get_policydb(void)/,/^}/d' "$RULES_FILE"
 
-    # [B] 注入原生声明 (Direct Ghost Link)
+    # [B] 注入实现代码 (核心修正)
     cat > rules_patch.c <<EOF
-/* [KSU] Native Definitions (Verified via services.h) */
+/* [KSU] Native Ghost Link (Strict C Compliant) */
 #include <linux/kallsyms.h>
+#include <linux/types.h>
 
+/* 1. 正确声明结构体类型 (不完整声明) 
+ * 这样链接器知道它是 struct selinux_ss，不会报错类型不匹配
+ */
 struct selinux_avc;
+struct selinux_ss; 
 struct policydb;
 
-/* * 关键修正：根据 services.h 第 27 行，selinux_ss 的第一个成员是 sidtab。
- * 我们必须加一个占位符 (sidtab_dummy) 来跳过这 8 个字节，
- * 否则 policydb 的地址就会错位，导致开机死循环。
- */
-struct selinux_ss {
-    void *sidtab_dummy;       // 对应 struct sidtab *sidtab
-    struct policydb policydb; // 我们的目标
-    void *dummy_rest;         // 后面的不重要
-};
-
-// 引用我们在 Step 2,3 解锁的原生变量
+/* 2. 引用原生变量 (Step 2/3 已去除 static) */
 extern struct selinux_ss selinux_ss;
 extern struct selinux_avc selinux_avc;
 extern int avc_ss_reset(struct selinux_avc *avc, u32 seqno);
 
 static struct policydb *get_policydb(void)
 {
-    // 直接取地址，极速且隐蔽
-    return &selinux_ss.policydb;
+    /* * 核心逻辑：基于 services.h 源码验证
+     * struct selinux_ss {
+     * struct sidtab *sidtab;    <-- Offset 0, Size 8
+     * struct policydb policydb; <-- Offset 8
+     * };
+     * * 我们将结构体指针转为 (char *) 以便进行字节级加法。
+     * sizeof(void *) 在 64位系统上等于 8。
+     */
+    char *base = (char *)&selinux_ss;
+    return (struct policydb *)(base + sizeof(void *));
 }
 
 static void reset_avc_cache(void)
 {
-    // 直接传原生变量指针
+    /* 直接传递指针，这是安全的，因为只需传地址 */
     avc_ss_reset(&selinux_avc, 0);
     
-    // 通知部分保持 kallsyms 兜底
+    /* 兜底通知逻辑 */
     void (*notify)(int) = (void *)kallsyms_lookup_name("selnl_notify_policyload");
     if (notify) notify(0);
     selinux_xfrm_notify_policyload();
@@ -358,10 +359,7 @@ static void reset_avc_cache(void)
 EOF
 
     # 插入代码
-    # 确保有头文件
     sed -i '1i #include <linux/types.h>' "$RULES_FILE"
-    
-    # 找个好位置插入 (在 include 之后)
     if grep -q "xfrm.h" "$RULES_FILE"; then
         sed -i '/include.*xfrm.h/r rules_patch.c' "$RULES_FILE"
     else
@@ -370,7 +368,7 @@ EOF
     rm -f rules_patch.c
 fi
 
-echo -e "\033[0;32m✅ [完美适配] 幽灵直连已完成 (偏移量已校准)！\033[0m"
+echo -e "\033[0;32m✅ [完美修正] 幽灵直连适配完成 (符合 C 语言类型规范)！\033[0m"
 
 
 # ==================== [Step 4: ReSukiSU 源码适配 (解除限制 + 兼容性修复)] ====================
